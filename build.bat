@@ -2,12 +2,10 @@
 setlocal
 cd /d "%~dp0"
 
-REM --- Clean old outputs ---
 if exist "build" rmdir /s /q "build"
-if exist "dist"  rmdir /s /q "dist"
+if exist "dist" rmdir /s /q "dist"
 if exist "output" rmdir /s /q "output"
 
-REM --- Build using the SPEC (no --onedir/--onefile allowed with .spec) ---
 pyinstaller --noconfirm "DAA_Calendar.spec"
 if errorlevel 1 (
   echo PyInstaller build failed.
@@ -15,7 +13,17 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM --- Compile installer (Inno Setup) ---
+if not exist "dist\DAA_Calendar\DAA_Calendar.exe" (
+  echo.
+  echo ERROR: Expected ONEDIR build was not produced.
+  echo Expected:
+  echo   dist\DAA_Calendar\DAA_Calendar.exe
+  echo.
+  echo Your DAA_Calendar.spec is still building ONEFILE.
+  pause
+  exit /b 1
+)
+
 where ISCC >nul 2>nul
 if errorlevel 1 (
   set "ISCC_EXE=C:\Program Files (x86)\Inno Setup 6\ISCC.exe"

@@ -1,11 +1,14 @@
 ; ============================================================
 ; File: installer.iss
+; Build this against a PyInstaller ONEDIR build
 ; ============================================================
 
 #define MyAppName "DAACal"
 #define MyAppExeName "DAA_Calendar.exe"
 #define MyAppPublisher "Ryan Chetty"
 #define MyAppVersion "1.2.1"
+#define MyAppDirName "DAACalendar"
+#define MyAppSourceDir "dist\DAA_Calendar"
 
 [Setup]
 AppId={{2DAEDB6B-9B72-4F6D-8B67-3E6B86E2D2B1}}
@@ -13,10 +16,10 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 
-DefaultDirName={autopf}\DAACalendar
+DefaultDirName={autopf}\{#MyAppDirName}
 UsePreviousAppDir=yes
 
-DefaultGroupName=DAACal
+DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 
 OutputDir=output
@@ -24,17 +27,17 @@ OutputBaseFilename=DAACal_Installer
 Compression=lzma
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
+PrivilegesRequired=admin
 
-; Installer icon (EXE for the installer itself)
 SetupIconFile=DAACal.ico
-
-; ARP (Add/Remove Programs) icon
 UninstallDisplayIcon={app}\DAACal.ico
 
-; Better update behavior
 CloseApplications=yes
+CloseApplicationsFilter={#MyAppExeName}
 RestartApplications=no
-PrivilegesRequired=admin
+
+WizardStyle=modern
+UsePreviousGroup=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -43,15 +46,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-; Main EXE (onefile)
-Source: "dist\DAA_Calendar.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
-
-; Install the icon so shortcuts + uninstall icon can reference it
+Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "DAACal.ico"; DestDir: "{app}"; Flags: ignoreversion
-
-; Optional extras you ship with app
-; Source: "DAA Claiming Spreadsheet.xlsx"; DestDir: "{app}"; Flags: ignoreversion
-; Source: "icons\*"; DestDir: "{app}\icons"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\DAACal"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\DAACal.ico"

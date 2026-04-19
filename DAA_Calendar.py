@@ -27,6 +27,15 @@ GITHUB_REPO = "daa-calendar"
 INSTALLER_ASSET_NAME = "DAACal_Installer.exe"
 APP_EXE_NAME = "DAA_Calendar.exe"
 
+def check_for_update_only(parent):
+    try:
+        release = get_latest_github_release()
+        latest_tag = (release.get("tag_name") or "").strip()
+        if latest_tag and is_newer_version(latest_tag, APP_VERSION):
+            if prompt_for_update(parent, latest_tag):
+                start_silent_update(parent)
+    except Exception as e:
+        print("Update check failed:", e)
 def parse_version(v: str):
     v = (v or "").strip().lstrip("vV")
     parts = []
@@ -69,27 +78,69 @@ def download_update_installer(download_url: str, asset_name: str) -> str:
         f.write(resp.read())
 
     return out_path
-def create_updater_bat(installer_path: str) -> str:
+def create_updater_bat(installer_path: str, old_pid: int) -> str:
     bat_path = os.path.join(tempfile.gettempdir(), "DAACal_RunUpdate.bat")
-    installed_exe = r"C:\Program Files\DAACalendar\DAA_Calendar.exe"
+    install_dir = r"C:\Program Files\DAACalendar"
+    installed_exe = os.path.join(install_dir, "DAA_Calendar.exe")
+
+    installer_path_q = installer_path.replace('"', '""')
+    install_dir_q = install_dir.replace('"', '""')
+    installed_exe_q = installed_exe.replace('"', '""')
 
     script = f"""@echo off
-setlocal
+setlocal enableextensions
 
-set "INSTALLER={installer_path}"
-set "APP_EXE={installed_exe}"
+set "OLD_PID={int(old_pid)}"
+set "INSTALLER={installer_path_q}"
+set "APP_DIR={install_dir_q}"
+set "APP_EXE={installed_exe_q}"
 
-timeout /t 2 /nobreak >nul
+rem ------------------------------------------------------------
+rem Wait for the ORIGINAL process by PID, not just image name
+rem ------------------------------------------------------------
+:wait_old_pid
+tasklist /FI "PID eq %OLD_PID%" | find "%OLD_PID%" >nul
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >nul
+    goto wait_old_pid
+)
 
-start /wait "" "%INSTALLER%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-
+rem Give PyInstaller one-file temp cleanup extra time
 timeout /t 8 /nobreak >nul
 
-if exist "%APP_EXE%" start "" "%APP_EXE%"
+rem ------------------------------------------------------------
+rem Run installer and wait for completion
+rem ------------------------------------------------------------
+if not exist "%INSTALLER%" exit /b 1
+start /wait "" "%INSTALLER%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+if errorlevel 1 exit /b 2
+
+rem ------------------------------------------------------------
+rem Wait until installed EXE exists
+rem ------------------------------------------------------------
+set /a WAITCOUNT=0
+:wait_new_exe
+if exist "%APP_EXE%" goto wait_settle
+set /a WAITCOUNT+=1
+if %WAITCOUNT% GEQ 120 exit /b 3
+timeout /t 1 /nobreak >nul
+goto wait_new_exe
+
+rem ------------------------------------------------------------
+rem Let install/uninstall file operations fully settle
+rem ------------------------------------------------------------
+:wait_settle
+timeout /t 10 /nobreak >nul
+
+rem ------------------------------------------------------------
+rem Launch from install directory
+rem ------------------------------------------------------------
+start "" /D "%APP_DIR%" "%APP_EXE%"
 
 endlocal
+exit /b 0
 """
-    with open(bat_path, "w", encoding="utf-8") as f:
+    with open(bat_path, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(script)
 
     return bat_path
@@ -97,10 +148,10 @@ endlocal
 def prompt_for_update(parent, latest_version: str) -> bool:
 
     msg = QMessageBox(parent)
-    msg.setWindowTitle("DAACal Update Available")
+    msg.setWindowTitle("Update Available")
     msg.setIcon(QMessageBox.Information)
     msg.setText(
-        f"A new version of DAACal is available.\n\n"
+        f"A new version is available.\n\n"
         f"Current version: {APP_VERSION}\n"
         f"New version: {latest_version.lstrip('vV')}\n\n"
         f"Update now?"
@@ -118,44 +169,46 @@ def start_silent_update(parent=None):
         if not is_newer_version(latest_tag, APP_VERSION):
             return False
 
-        if not prompt_for_update(parent, latest_tag):
-            return False
-
         asset = find_installer_asset(release)
         if not asset:
-            from PyQt5.QtWidgets import QMessageBox
-            QMessageBox.warning(parent, "Update Error", "No installer asset was found in the latest GitHub release.")
+            QMessageBox.warning(parent, "Update Error", "No installer asset found.")
             return False
 
         installer_url = asset.get("browser_download_url", "").strip()
         asset_name = asset.get("name", INSTALLER_ASSET_NAME).strip() or INSTALLER_ASSET_NAME
         if not installer_url:
-            from PyQt5.QtWidgets import QMessageBox
-            QMessageBox.warning(parent, "Update Error", "The installer download URL is missing.")
+            QMessageBox.warning(parent, "Update Error", "Installer download URL missing.")
             return False
 
         installer_path = download_update_installer(installer_url, asset_name)
-
-        updater_bat = create_updater_bat(installer_path)
+        updater_bat = create_updater_bat(installer_path, os.getpid())
 
         subprocess.Popen(
             ["cmd.exe", "/c", updater_bat],
-            creationflags=subprocess.CREATE_NO_WINDOW
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            close_fds=True,
         )
 
-        # ask current app instance to quit cleanly
-        try:
-            send_ipc_command("QUIT")
-        except Exception:
-            pass
+        app = QApplication.instance()
+        if app is not None:
+            for w in app.topLevelWidgets():
+                try:
+                    w.close()
+                except Exception:
+                    pass
+            QTimer.singleShot(0, app.quit)
+        else:
+            sys.exit(0)
 
-        QApplication.quit()
         return True
 
     except Exception as e:
         print("Updater failed:", e)
+        try:
+            QMessageBox.warning(parent, "Update Error", f"Updater failed:\n{e}")
+        except Exception:
+            pass
         return False
-
 def resource_path(relative_name: str) -> str:
     """
     Returns an absolute path to a bundled resource.
@@ -8876,7 +8929,7 @@ if __name__ == "__main__":
     mainWin = WebsterCalendarApp(splash=splash)
     mainWin.showMaximized()
 
-    QTimer.singleShot(3000, lambda: start_silent_update(mainWin))
+    QTimer.singleShot(20000, lambda: check_for_update_only(mainWin))
 
     app.exec_()
 
