@@ -5,7 +5,7 @@
 #define MyAppName "DAACal"
 #define MyAppExeName "DAA_Calendar.exe"
 #define MyAppPublisher "Ryan Chetty"
-#define MyAppVersion "1.2"
+#define MyAppVersion "1.2.1"
 
 [Setup]
 AppId={{2DAEDB6B-9B72-4F6D-8B67-3E6B86E2D2B1}}

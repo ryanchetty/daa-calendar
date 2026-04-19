@@ -21,7 +21,7 @@ from watchdog.events import FileSystemEventHandler
 from openpyxl import Workbook, load_workbook
 
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.2.1"
 GITHUB_OWNER = "ryanchetty"
 GITHUB_REPO = "daa-calendar"
 INSTALLER_ASSET_NAME = "DAACal_Installer.exe"
@@ -69,22 +69,23 @@ def download_update_installer(download_url: str, asset_name: str) -> str:
         f.write(resp.read())
 
     return out_path
-def create_updater_bat(installer_path: str, app_exe_path: str) -> str:
+def create_updater_bat(installer_path: str) -> str:
     bat_path = os.path.join(tempfile.gettempdir(), "DAACal_RunUpdate.bat")
+    installed_exe = r"C:\Program Files\DAACalendar\DAA_Calendar.exe"
 
     script = f"""@echo off
 setlocal
 
 set "INSTALLER={installer_path}"
-set "APP_EXE={app_exe_path}"
+set "APP_EXE={installed_exe}"
 
 timeout /t 2 /nobreak >nul
 
-"%INSTALLER%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+start /wait "" "%INSTALLER%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 
-timeout /t 2 /nobreak >nul
+timeout /t 8 /nobreak >nul
 
-start "" "%APP_EXE%"
+if exist "%APP_EXE%" start "" "%APP_EXE%"
 
 endlocal
 """
@@ -94,7 +95,6 @@ endlocal
     return bat_path
 
 def prompt_for_update(parent, latest_version: str) -> bool:
-    from PyQt5.QtWidgets import QMessageBox
 
     msg = QMessageBox(parent)
     msg.setWindowTitle("DAACal Update Available")
@@ -136,12 +136,7 @@ def start_silent_update(parent=None):
 
         installer_path = download_update_installer(installer_url, asset_name)
 
-        if getattr(sys, "frozen", False):
-            app_exe_path = sys.executable
-        else:
-            app_exe_path = os.path.abspath(sys.argv[0])
-
-        updater_bat = create_updater_bat(installer_path, app_exe_path)
+        updater_bat = create_updater_bat(installer_path)
 
         subprocess.Popen(
             ["cmd.exe", "/c", updater_bat],
