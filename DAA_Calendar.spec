@@ -10,7 +10,9 @@ a = Analysis(
     binaries=[],
     datas=[
         ('DAACal.ico', '.'),
+	('DAACal.png', '.'),
         ('DAA Claiming Spreadsheet.xlsx', '.'),
+	('icons', 'icons'),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],

@@ -1,41 +1,90 @@
-import os, json, sqlite3, openpyxl, re, sys, threading, time, calendar, datetime, psutil, fitz, math, tempfile, urllib.request, subprocess, ssl, certifi
+import calendar
+import certifi
+import datetime
+import fitz
+import json
+import openpyxl
+import os
+import re
+import sqlite3
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import shutil
+
 from datetime import datetime, timedelta, date
-from PyQt5 import QtCore, QtGui, QtWidgets, sip
-from PyQt5.QtCore import Qt, QTimer, QEvent, QObject, QMarginsF, QRect, pyqtSignal, pyqtSlot, QMetaObject, QDate, QPointF, QSize, QRectF, QStandardPaths, QSizeF
-from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog, QPrinterInfo
-from PyQt5.QtGui import QColor, QBrush, QFont, QIcon, QPainter, QPageLayout, QPageSize, QPixmap, QTextDocument, QImage, qAlpha, QPen, QTransform
-from PyQt5.QtWidgets import (QToolButton, QFrame,
-    QAction, QApplication, QCheckBox, QComboBox, QDialog, QGridLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenuBar,
-    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpacerItem, QSplitter,
-    QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
-    QTabBar, QStackedWidget, QFileDialog, QStyleFactory, QTableView,
-    QStyledItemDelegate, QRadioButton, QAbstractScrollArea, QLayout,
-    QDateEdit, QListWidgetItem, QGraphicsView, QGraphicsScene, QListWidget,
-    QButtonGroup, QFormLayout, QSizePolicy, QDoubleSpinBox, QSplashScreen
-)
+
+from PyQt5 import QtCore, QtWidgets, sip
+
+from PyQt5.QtCore import (Qt, QTimer, QEvent, QObject, QMarginsF, pyqtSignal,
+                          pyqtSlot, QMetaObject, QDate, QPointF, QSize, QRectF,
+                          QStandardPaths, QPropertyAnimation
+                          )
+from PyQt5.QtGui import (QColor, QBrush, QFont, QIcon, QPainter, QPageLayout, QPageSize,
+                         QPixmap, QTextDocument, QImage, QTransform, QMovie, QPainterPath, QRegion
+                         )
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket
+from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog, QPrinterInfo
 from PyQt5.QtSvg import QSvgRenderer
-from watchdog.observers import Observer
+from PyQt5.QtWidgets import (QToolButton, QFrame,
+                             QAction, QApplication, QCheckBox, QComboBox, QDialog, QGridLayout, QGroupBox,
+                             QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenuBar,
+                             QMessageBox, QPushButton, QScrollArea, QSplitter,
+                             QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+                             QTabBar, QStackedWidget, QFileDialog, QStyledItemDelegate, QRadioButton,
+                             QAbstractScrollArea, QLayout,
+                             QDateEdit, QListWidgetItem, QGraphicsView, QGraphicsScene, QListWidget,
+                             QButtonGroup, QSizePolicy, QDoubleSpinBox
+                             )
 from watchdog.events import FileSystemEventHandler
-from openpyxl import Workbook, load_workbook
+from watchdog.observers import Observer
 
-
-APP_VERSION = "1.2.1"
+APP_VERSION = "2.0.1"
 GITHUB_OWNER = "ryanchetty"
 GITHUB_REPO = "daa-calendar"
 INSTALLER_ASSET_NAME = "DAACal_Installer.exe"
 APP_EXE_NAME = "DAA_Calendar.exe"
+SERVER_UPDATE_FOLDER_NAME = "Place Update here"
+SERVER_VERSION_FILE_NAME = "version.json"
+BACKUP_FOLDER_NAME = "DB Backups"
+SITE_NAME_DEFAULT = "Unselected Site"
+LAST_SERVER_UPDATE_INFO = None
+LAST_GITHUB_UPDATE_INFO = None
+LAST_UPDATE_CHECK_TIME = None
+
 
 def check_for_update_only(parent):
+    global LAST_SERVER_UPDATE_INFO, LAST_GITHUB_UPDATE_INFO, LAST_UPDATE_CHECK_TIME
+
     try:
-        release = get_latest_github_release()
-        latest_tag = (release.get("tag_name") or "").strip()
-        if latest_tag and is_newer_version(latest_tag, APP_VERSION):
-            if prompt_for_update(parent, latest_tag):
-                start_silent_update(parent)
+        LAST_SERVER_UPDATE_INFO = get_server_update_info()
+        LAST_GITHUB_UPDATE_INFO = get_github_update_info()
+        LAST_UPDATE_CHECK_TIME = datetime.now()
+
+        info = None
+
+        if (
+            LAST_SERVER_UPDATE_INFO.get("available")
+            and is_newer_version(LAST_SERVER_UPDATE_INFO.get("version", ""), APP_VERSION)
+        ):
+            info = LAST_SERVER_UPDATE_INFO
+
+        elif (
+            LAST_GITHUB_UPDATE_INFO.get("available")
+            and is_newer_version(LAST_GITHUB_UPDATE_INFO.get("version", ""), APP_VERSION)
+        ):
+            info = LAST_GITHUB_UPDATE_INFO
+
+        if info:
+            if prompt_for_update(parent, info["version"], source=info["source"]):
+                start_update_from_info(parent, info)
+
     except Exception as e:
         print("Update check failed:", e)
+
 def parse_version(v: str):
     v = (v or "").strip().lstrip("vV")
     parts = []
@@ -46,17 +95,166 @@ def parse_version(v: str):
             parts.append(0)
     return tuple(parts)
 
+
 def is_newer_version(latest: str, current: str) -> bool:
     return parse_version(latest) > parse_version(current)
 
+
+def get_server_update_dir() -> str:
+    update_dir = os.path.join(BASE_DIR, SERVER_UPDATE_FOLDER_NAME)
+    os.makedirs(update_dir, exist_ok=True)
+
+    readme_path = os.path.join(update_dir, "README - PLACE UPDATE HERE.txt")
+    if not os.path.exists(readme_path):
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(
+                "Place DAACal updates in this folder.\n\n"
+                "Required files:\n"
+                "1. DAACal_Installer.exe\n"
+                "2. version.json\n\n"
+                "Example version.json:\n"
+                "{\n"
+                '  "version": "1.2.2",\n'
+                '  "installer": "DAACal_Installer.exe"\n'
+                "}\n"
+            )
+
+    return update_dir
+
+
+def get_server_update_info():
+    update_dir = get_server_update_dir()
+    version_path = os.path.join(update_dir, SERVER_VERSION_FILE_NAME)
+
+    if not os.path.exists(version_path):
+        return {
+            "source": "Server folder",
+            "available": False,
+            "version": "",
+            "status": f"No {SERVER_VERSION_FILE_NAME} found.",
+            "path": update_dir,
+        }
+
+    try:
+        with open(version_path, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+
+        version = str(data.get("version", "")).strip()
+        installer_name = str(data.get("installer", INSTALLER_ASSET_NAME)).strip() or INSTALLER_ASSET_NAME
+        installer_path = os.path.join(update_dir, installer_name)
+
+        if not version:
+            return {
+                "source": "Server folder",
+                "available": False,
+                "version": "",
+                "status": "version.json exists but has no version value.",
+                "path": update_dir,
+            }
+
+        if not os.path.exists(installer_path):
+            return {
+                "source": "Server folder",
+                "available": False,
+                "version": version,
+                "status": f"Installer missing: {installer_name}",
+                "path": update_dir,
+            }
+
+        return {
+            "source": "Server folder",
+            "available": True,
+            "version": version,
+            "installer_path": installer_path,
+            "status": "Ready.",
+            "path": update_dir,
+        }
+
+    except Exception as e:
+        return {
+            "source": "Server folder",
+            "available": False,
+            "version": "",
+            "status": f"Server update check failed: {e}",
+            "path": update_dir,
+        }
+
+
 def get_latest_github_release():
-    url = f"https://api.github.com/repos/ryanchetty/daa-calendar/releases/latest"
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
     req = urllib.request.Request(url, headers={"User-Agent": "DAACal-Updater"})
 
     ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     with urllib.request.urlopen(req, timeout=15, context=ssl_context) as resp:
         return json.load(resp)
+
+
+def get_github_update_info():
+    try:
+        release = get_latest_github_release()
+        latest_tag = (release.get("tag_name") or "").strip()
+
+        if not latest_tag:
+            return {
+                "source": "GitHub",
+                "available": False,
+                "version": "",
+                "status": "No GitHub release tag found.",
+            }
+
+        asset = find_installer_asset(release)
+        if not asset:
+            return {
+                "source": "GitHub",
+                "available": False,
+                "version": latest_tag,
+                "status": "No installer asset found.",
+            }
+
+        installer_url = asset.get("browser_download_url", "").strip()
+        asset_name = asset.get("name", INSTALLER_ASSET_NAME).strip() or INSTALLER_ASSET_NAME
+
+        if not installer_url:
+            return {
+                "source": "GitHub",
+                "available": False,
+                "version": latest_tag,
+                "status": "Installer download URL missing.",
+            }
+
+        return {
+            "source": "GitHub",
+            "available": True,
+            "version": latest_tag,
+            "download_url": installer_url,
+            "asset_name": asset_name,
+            "status": "Ready.",
+        }
+
+    except Exception as e:
+        return {
+            "source": "GitHub",
+            "available": False,
+            "version": "",
+            "status": f"GitHub blocked or unavailable: {e}",
+        }
+
+
+def get_best_available_update():
+    server = get_server_update_info()
+
+    if server.get("available") and is_newer_version(server.get("version", ""), APP_VERSION):
+        return server
+
+    github = get_github_update_info()
+
+    if github.get("available") and is_newer_version(github.get("version", ""), APP_VERSION):
+        return github
+
+    return None
+
+
 def find_installer_asset(release: dict):
     for asset in release.get("assets", []):
         name = asset.get("name", "")
@@ -70,6 +268,7 @@ def find_installer_asset(release: dict):
 
     return None
 
+
 def download_update_installer(download_url: str, asset_name: str) -> str:
     out_path = os.path.join(tempfile.gettempdir(), asset_name)
     ssl_context = ssl.create_default_context(cafile=certifi.where())
@@ -78,10 +277,24 @@ def download_update_installer(download_url: str, asset_name: str) -> str:
         f.write(resp.read())
 
     return out_path
+
+
+def copy_server_update_installer(installer_path: str) -> str:
+    if not os.path.exists(installer_path):
+        raise FileNotFoundError(installer_path)
+
+    out_path = os.path.join(tempfile.gettempdir(), os.path.basename(installer_path))
+
+    with open(installer_path, "rb") as src, open(out_path, "wb") as dst:
+        dst.write(src.read())
+
+    return out_path
+
+
 def create_updater_bat(installer_path: str, old_pid: int) -> str:
     bat_path = os.path.join(tempfile.gettempdir(), "DAACal_RunUpdate.bat")
     install_dir = r"C:\Program Files\DAACalendar"
-    installed_exe = os.path.join(install_dir, "DAA_Calendar.exe")
+    installed_exe = os.path.join(install_dir, APP_EXE_NAME)
 
     installer_path_q = installer_path.replace('"', '""')
     install_dir_q = install_dir.replace('"', '""')
@@ -95,9 +308,6 @@ set "INSTALLER={installer_path_q}"
 set "APP_DIR={install_dir_q}"
 set "APP_EXE={installed_exe_q}"
 
-rem ------------------------------------------------------------
-rem Wait for the ORIGINAL process by PID, not just image name
-rem ------------------------------------------------------------
 :wait_old_pid
 tasklist /FI "PID eq %OLD_PID%" | find "%OLD_PID%" >nul
 if not errorlevel 1 (
@@ -105,19 +315,12 @@ if not errorlevel 1 (
     goto wait_old_pid
 )
 
-rem Give PyInstaller one-file temp cleanup extra time
 timeout /t 8 /nobreak >nul
 
-rem ------------------------------------------------------------
-rem Run installer and wait for completion
-rem ------------------------------------------------------------
 if not exist "%INSTALLER%" exit /b 1
 start /wait "" "%INSTALLER%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 if errorlevel 1 exit /b 2
 
-rem ------------------------------------------------------------
-rem Wait until installed EXE exists
-rem ------------------------------------------------------------
 set /a WAITCOUNT=0
 :wait_new_exe
 if exist "%APP_EXE%" goto wait_settle
@@ -126,15 +329,9 @@ if %WAITCOUNT% GEQ 120 exit /b 3
 timeout /t 1 /nobreak >nul
 goto wait_new_exe
 
-rem ------------------------------------------------------------
-rem Let install/uninstall file operations fully settle
-rem ------------------------------------------------------------
 :wait_settle
 timeout /t 10 /nobreak >nul
 
-rem ------------------------------------------------------------
-rem Launch from install directory
-rem ------------------------------------------------------------
 start "" /D "%APP_DIR%" "%APP_EXE%"
 
 endlocal
@@ -145,42 +342,35 @@ exit /b 0
 
     return bat_path
 
-def prompt_for_update(parent, latest_version: str) -> bool:
 
+def prompt_for_update(parent, latest_version: str, source: str = "Update source") -> bool:
     msg = QMessageBox(parent)
     msg.setWindowTitle("Update Available")
     msg.setIcon(QMessageBox.Information)
     msg.setText(
         f"A new version is available.\n\n"
         f"Current version: {APP_VERSION}\n"
-        f"New version: {latest_version.lstrip('vV')}\n\n"
+        f"New version: {latest_version.lstrip('vV')}\n"
+        f"Source: {source}\n\n"
         f"Update now?"
     )
     msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
     return msg.exec_() == QMessageBox.Yes
 
-def start_silent_update(parent=None):
+
+def start_update_from_info(parent, info: dict):
     try:
-        release = get_latest_github_release()
-        latest_tag = (release.get("tag_name") or "").strip()
-        if not latest_tag:
+        source = info.get("source", "")
+
+        if source == "Server folder":
+            installer_path = copy_server_update_installer(info["installer_path"])
+        elif source == "GitHub":
+            installer_path = download_update_installer(info["download_url"],
+                                                       info.get("asset_name", INSTALLER_ASSET_NAME))
+        else:
+            parent.show_daacal_notification("Update Error", "Unknown update source.")
             return False
 
-        if not is_newer_version(latest_tag, APP_VERSION):
-            return False
-
-        asset = find_installer_asset(release)
-        if not asset:
-            QMessageBox.warning(parent, "Update Error", "No installer asset found.")
-            return False
-
-        installer_url = asset.get("browser_download_url", "").strip()
-        asset_name = asset.get("name", INSTALLER_ASSET_NAME).strip() or INSTALLER_ASSET_NAME
-        if not installer_url:
-            QMessageBox.warning(parent, "Update Error", "Installer download URL missing.")
-            return False
-
-        installer_path = download_update_installer(installer_url, asset_name)
         updater_bat = create_updater_bat(installer_path, os.getpid())
 
         subprocess.Popen(
@@ -205,10 +395,182 @@ def start_silent_update(parent=None):
     except Exception as e:
         print("Updater failed:", e)
         try:
-            QMessageBox.warning(parent, "Update Error", f"Updater failed:\n{e}")
+            parent.show_daacal_notification("Update Error", f"Updater failed:<br>{e}")
         except Exception:
             pass
         return False
+
+
+def start_silent_update(parent=None):
+    info = get_best_available_update()
+    if not info:
+        return False
+    return start_update_from_info(parent, info)
+
+def ensure_app_metadata_table():
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_db_metadata(key: str, default: str = "") -> str:
+    ensure_app_metadata_table()
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM app_metadata WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return str(row[0]).strip() if row and row[0] is not None else default
+    finally:
+        conn.close()
+
+
+def set_db_metadata(key: str, value: str):
+    ensure_app_metadata_table()
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO app_metadata(key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """, (key, value))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_site_name() -> str:
+    return get_db_metadata("site_name", SITE_NAME_DEFAULT).strip() or SITE_NAME_DEFAULT
+
+
+def set_site_name(site_name: str):
+    site_name = (site_name or "").strip() or SITE_NAME_DEFAULT
+    set_db_metadata("site_name", site_name)
+
+
+def get_backup_dir() -> str:
+    backup_dir = os.path.join(BASE_DIR, BACKUP_FOLDER_NAME)
+    os.makedirs(backup_dir, exist_ok=True)
+    return backup_dir
+
+
+def db_backup_filename(prefix="webster_calendar"):
+    site = re.sub(r"[^A-Za-z0-9_-]+", "_", get_site_name()).strip("_") or "site"
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return f"{prefix}_{site}_{stamp}.db"
+
+
+def backup_current_db(reason="manual") -> str:
+    if not os.path.exists(DB_FILE):
+        raise FileNotFoundError(DB_FILE)
+
+    backup_dir = get_backup_dir()
+    out_path = os.path.join(backup_dir, db_backup_filename(prefix=f"webster_calendar_{reason}"))
+
+    src = sqlite3.connect(DB_FILE)
+    dst = sqlite3.connect(out_path)
+
+    try:
+        with dst:
+            src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+    return out_path
+
+
+def daily_db_backup_if_needed():
+    backup_dir = get_backup_dir()
+    today = datetime.now().strftime("%Y-%m-%d")
+    site = re.sub(r"[^A-Za-z0-9_-]+", "_", get_site_name()).strip("_") or "site"
+
+    existing = [
+        f for f in os.listdir(backup_dir)
+        if f.startswith(f"webster_calendar_daily_{site}_{today}")
+        and f.lower().endswith(".db")
+    ]
+
+    if existing:
+        return None
+
+    return backup_current_db(reason="daily")
+
+
+def list_db_backups():
+    backup_dir = get_backup_dir()
+    files = []
+
+    for name in os.listdir(backup_dir):
+        if not name.lower().endswith((".db", ".dp")):
+            continue
+
+        path = os.path.join(backup_dir, name)
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            mtime = 0
+
+        files.append((mtime, name, path))
+
+    files.sort(reverse=True)
+    return files
+
+
+def validate_sqlite_db(path: str) -> bool:
+    conn = sqlite3.connect(path)
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA integrity_check")
+        row = cur.fetchone()
+        if not row or str(row[0]).lower() != "ok":
+            return False
+
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='patients'")
+        return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def replace_live_db_from_file(import_path: str):
+    import_path = os.path.abspath(import_path)
+    live_path = os.path.abspath(DB_FILE)
+
+    if not os.path.exists(import_path):
+        raise FileNotFoundError(f"Import file not found:\n{import_path}")
+
+    if import_path == live_path:
+        raise RuntimeError("Cannot import the currently active database file.")
+
+    if not validate_sqlite_db(import_path):
+        raise RuntimeError(f"Selected file is not a valid DAACal database:\n{import_path}")
+
+    safety_backup = backup_current_db(reason="before_restore")
+
+    tmp_path = live_path + ".incoming"
+
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    shutil.copy2(import_path, tmp_path)
+
+    if not validate_sqlite_db(tmp_path):
+        os.remove(tmp_path)
+        raise RuntimeError("Copied import database failed validation before replacement.")
+
+    os.replace(tmp_path, live_path)
+
+    return safety_backup
 def resource_path(relative_name: str) -> str:
     """
     Returns an absolute path to a bundled resource.
@@ -222,6 +584,7 @@ def resource_path(relative_name: str) -> str:
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_dir, relative_name)
+
 
 class LoadingSpinner(QWidget):
     def __init__(self, parent=None, size=36):
@@ -265,6 +628,7 @@ class LoadingSpinner(QWidget):
             painter.drawEllipse(QRectF(-dot_size / 2.0, y - dot_size / 2.0, dot_size, dot_size))
             painter.restore()
 
+
 class StartupSplash(QWidget):
     def __init__(self, pixmap):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SplashScreen)
@@ -290,6 +654,7 @@ class StartupSplash(QWidget):
             screen.center().x() - self.width() // 2,
             screen.center().y() - self.height() // 2
         )
+
 
 class MPSBlisterWizardDialog(QDialog):
     CAL_ZERO_PAD_X = 1.30
@@ -781,6 +1146,7 @@ class MPSBlisterWizardDialog(QDialog):
                 labels[i] = base[i]
 
         return labels, blank_flags
+
     def _rgb01_from_hex(self, hx: str):
         hx = hx.lstrip("#")
         return tuple(int(hx[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
@@ -937,7 +1303,6 @@ class MPSBlisterWizardDialog(QDialog):
 
         if dbg:
             print(f"[WARN] all table font candidates failed for text={text!r} box={tuple(box)}")
-
 
     def _extract_header_spans(self, page):
         """
@@ -1115,8 +1480,6 @@ class MPSBlisterWizardDialog(QDialog):
     # Calibration persistence (global)
     # ---------------------------------
 
-
-
     """
     Multi-patient aware MPS blister wizard.
     Each patient gets independent weeks/blister + header settings.
@@ -1203,7 +1566,7 @@ class MPSBlisterWizardDialog(QDialog):
         self._build_final_doc()
 
         if not self.work_doc or self.work_doc.page_count == 0:
-            QMessageBox.warning(self, "Nothing to print", "No pages available to print.")
+            self.show_daacal_notification( "Nothing to print", "No pages available to print.")
             return
 
         # --- Validate printer using saved MPS printer name ---
@@ -1227,18 +1590,13 @@ class MPSBlisterWizardDialog(QDialog):
             mps_orientation = "portrait"
 
         if not mps_printer_name:
-            QMessageBox.warning(
-                self,
-                "MPS Printer Not Set",
-                "Please set an MPS default printer in Manage -> Set Printer."
-            )
+            self.show_daacal_notification("MPS Printer Not Set", "Please set an MPS default printer in Manage -> Set Printer.")
             return
 
         if mps_printer_name not in available_printers:
-            QMessageBox.warning(
-                self,
+            self.show_daacal_notification(
                 "MPS Printer Unavailable",
-                f"The saved MPS printer '{mps_printer_name}' is not currently available.\n"
+                f"The saved MPS printer '{mps_printer_name}' is not currently available.<br>"
                 f"Use Manage -> Refresh Printers, then Set Printer."
             )
             return
@@ -1297,11 +1655,7 @@ class MPSBlisterWizardDialog(QDialog):
 
         painter = QPainter()
         if not painter.begin(printer):
-            QMessageBox.warning(
-                self,
-                "Print Failed",
-                f"Could not start print job on '{mps_printer_name}'."
-            )
+            self.show_daacal_notification("Print Failed", f"Could not start print job on '{mps_printer_name}'.")
             return
 
         try:
@@ -1321,11 +1675,7 @@ class MPSBlisterWizardDialog(QDialog):
 
             if full_mm is None:
                 painter.end()
-                QMessageBox.warning(
-                    self,
-                    "Print Failed",
-                    "Could not read printer page size after starting the print job."
-                )
+                self.show_daacal_notification("Print Failed", "Could not read printer page size after starting the print job.")
                 return
 
             actual_w = float(full_mm.width())
@@ -1428,7 +1778,6 @@ class MPSBlisterWizardDialog(QDialog):
                     QImage.Format_RGB888,
                 ).copy()
 
-
                 if mps_orientation == "portrait":
                     try:
                         transform = QTransform()
@@ -1453,10 +1802,9 @@ class MPSBlisterWizardDialog(QDialog):
                 painter.end()
             except Exception:
                 pass
-            QMessageBox.critical(
-                self,
+            self.show_daacal_notification(
                 "Print Failed",
-                f"An error occurred while printing:\n\n{e}"
+                f"An error occurred while printing:<br><br>{e}"
             )
             return
 
@@ -1476,6 +1824,7 @@ class MPSBlisterWizardDialog(QDialog):
                 ov.get("headers") or [],
                 ov.get("headers_blank") or [False, False, False, False],
             )
+
     def _apply(self):
         """Apply current settings to preview and save per-patient settings to DB."""
         # Ensure current patient's latest UI is captured
@@ -1768,8 +2117,6 @@ class MPSBlisterWizardDialog(QDialog):
         self._replace_dates_on_page(p1, repl1)
 
         return out
-
-
 
     def _find_pill_slots_on_page(self, page, tol=0.20):
         """
@@ -2245,7 +2592,7 @@ class MPSBlisterWizardDialog(QDialog):
         l1.addWidget(QLabel("Weeks per blister:"))
 
         # --- Icon toggle buttons (SVG) ---
-        icons_dir = os.path.join(BASE_DIR, "icons")
+        icons_dir = resource_path("icons")
 
         self.weeks_group = QButtonGroup(self)
         self.weeks_group.setExclusive(True)
@@ -2395,6 +2742,7 @@ class MPSBlisterWizardDialog(QDialog):
                     self._apply()
 
             blank.toggled.connect(_maybe_apply)
+
             # persist any new typed/selected option so it appears next time
             def _persist_option(_=None, combo=cb):
                 t = combo.currentText().strip()
@@ -2598,6 +2946,7 @@ class MPSBlisterWizardDialog(QDialog):
         finally:
             for w in (self.w1, self.w2, self.w4, *self.header_combos, *self.header_blank_checks):
                 w.blockSignals(False)
+
     def _set_weeks_ui(self, w):
         {1: self.w1, 2: self.w2, 4: self.w4}.get(int(w or 1), self.w1).setChecked(True)
 
@@ -2651,6 +3000,7 @@ class MPSBlisterWizardDialog(QDialog):
         # Keep enabled/disabled consistent (signals might be blocked)
         for cb, chk in zip(self.header_combos, self.header_blank_checks):
             cb.setEnabled(not chk.isChecked())
+
     # Navigation / build
     # ------------------------------------------------------------------
     def _next(self):
@@ -2719,6 +3069,7 @@ class MPSBlisterWizardDialog(QDialog):
 
         self.work_doc = out
         self._render_preview()
+
     def _save(self):
         # Default filename: date + time (24h)
         stamp = datetime.now().strftime("%d-%m-%Y_%H%M")
@@ -2749,10 +3100,9 @@ class MPSBlisterWizardDialog(QDialog):
             try:
                 os.remove(path)
             except Exception as e:
-                QMessageBox.critical(
-                    self,
+                self.show_daacal_notification(
                     "Cannot overwrite",
-                    f"Unable to remove the existing file:\n\n{path}\n\n{e}",
+                    f"Unable to remove the existing file:<br><br>{path}<br><br>{e}"
                 )
                 return
 
@@ -2766,13 +3116,15 @@ class MPSBlisterWizardDialog(QDialog):
         try:
             self.work_doc.save(path)
         except Exception as e:
-            QMessageBox.critical(self, "Save error", f"Failed to save PDF:\n\n{e}")
+            self.show_daacal_notification("Save error", f"Failed to save PDF:<br><br>{e}")
             return
 
         # Persist settings (same as before)
         self._persist_all_settings_to_db()
 
         self.accept()
+
+
 class PdfGraphicsView(QGraphicsView):
     """
     QGraphicsView that emits a signal with scene coordinates when clicked.
@@ -2799,6 +3151,7 @@ def span_text(span):
         return "".join(ch.get("c", "") for ch in chars)
     return ""
 
+
 def replace_span_text(page, span, new_text: str):
     new_text = str(new_text)
     full_rect = fitz.Rect(span["bbox"])
@@ -2814,13 +3167,13 @@ def replace_span_text(page, span, new_text: str):
         if size < 8:
             # TABLE HEADERS / TIMES (small text)
             # → small, proportional patch just covering the time/text
-            margin_y = h * 0.15      # a bit taller than glyphs
-            margin_x = w * 0.25      # a bit wider left/right
+            margin_y = h * 0.15  # a bit taller than glyphs
+            margin_x = w * 0.25  # a bit wider left/right
         else:
             # PILL LABELS (big text in coloured capsules)
             # → TALL and WIDE to cover the whole green/yellow bar
-            margin_y = h * 0.80      # back to tall box
-            margin_x = w * 1.25      # very wide horizontally
+            margin_y = h * 0.80  # back to tall box
+            margin_x = w * 1.25  # very wide horizontally
 
         erase_rect = fitz.Rect(
             full_rect.x0 - margin_x,
@@ -2870,12 +3223,12 @@ def replace_span_text(page, span, new_text: str):
     )
 
 
-
 class BlisterHeadingDialog(QDialog):
     """
     Dialog to let the user pick which headings (e.g. 08:05, 08:10, 08:15)
     to replace, and what to replace them with (e.g. B'FAST).
     """
+
     def __init__(self, parent, labels):
         super().__init__(parent)
         self.setWindowTitle("Blister headings")
@@ -2938,7 +3291,6 @@ class BlisterHeadingDialog(QDialog):
         return self.replace_text
 
 
-
 def _extract_page_dates(doc):
     """
     For each page, return a list [start, end, expiry] as strings like '08 Dec 25',
@@ -2976,7 +3328,6 @@ def combine_4week_blister_to_single(input_path: str,
                                     output_path: str,
                                     times_to_change=None,
                                     new_time_label="B'FAST"):
-
     doc = fitz.open(input_path)
     page_dates = _extract_page_dates(doc)
 
@@ -2991,7 +3342,7 @@ def combine_4week_blister_to_single(input_path: str,
     overall_end = max(ends, key=parse_date)
 
     #  ---- FIXED LINE ----
-    overall_expiry = min(expiries, key=parse_date)     # oldest expiry (printed on last blister)
+    overall_expiry = min(expiries, key=parse_date)  # oldest expiry (printed on last blister)
 
     out = fitz.open()
     out.insert_pdf(doc, from_page=0, to_page=0)
@@ -3003,8 +3354,6 @@ def combine_4week_blister_to_single(input_path: str,
         old_end: overall_end,
         old_expiry: overall_expiry,
     }
-
-
 
 
 def combine_4week_blister_to_two(input_path: str,
@@ -3108,6 +3457,7 @@ class PdfEditorDialog(QDialog):
     - Click any visible text to edit it (span-level, same font/size)
     - Right: Save tools + 4-week blister layout (4→1 page, 4→2 pages)
     """
+
     def __init__(self, parent, pdf_path: str):
         super().__init__(parent)
         self.setWindowTitle(f"PDF Editor - {os.path.basename(pdf_path)}")
@@ -3136,13 +3486,12 @@ class PdfEditorDialog(QDialog):
         # Right panel
         right = QVBoxLayout()
 
-
         # Save buttons
-        #self.save_btn = QPushButton("Save")
+        # self.save_btn = QPushButton("Save")
         self.save_as_btn = QPushButton("Save As…")
-        #self.save_btn.clicked.connect(self.save)
+        # self.save_btn.clicked.connect(self.save)
         self.save_as_btn.clicked.connect(self.save_as)
-        #right.addWidget(self.save_btn)
+        # right.addWidget(self.save_btn)
         right.addWidget(self.save_as_btn)
 
         # 4-week blister layout box
@@ -3170,7 +3519,7 @@ class PdfEditorDialog(QDialog):
         try:
             self.doc = fitz.open(path)
         except Exception as e:
-            QMessageBox.critical(self, "Error opening PDF", str(e))
+            self.show_daacal_notification("Error opening PDF", str(e))
             self.reject()
             return
 
@@ -3257,9 +3606,9 @@ class PdfEditorDialog(QDialog):
             return
         try:
             self.doc.save(self.pdf_path, incremental=False)
-            QMessageBox.information(self, "Saved", f"Saved to:\n{self.pdf_path}")
+            self.show_daacal_notification("Saved", f"Saved to:<br>{self.pdf_path}")
         except Exception as e:
-            QMessageBox.critical(self, "Save error", str(e))
+            self.show_daacal_notification("Save error", str(e))
 
     def save_as(self):
         if not self.doc:
@@ -3273,9 +3622,9 @@ class PdfEditorDialog(QDialog):
             out_path += ".pdf"
         try:
             self.doc.save(out_path, incremental=False)
-            QMessageBox.information(self, "Saved", f"Saved to:\n{out_path}")
+            self.show_daacal_notification("Saved", f"Saved to:<br>{out_path}")
         except Exception as e:
-            QMessageBox.critical(self, "Save error", str(e))
+            self.show_daacal_notification("Save error", str(e))
 
     def closeEvent(self, event):
         if self.doc is not None:
@@ -3298,8 +3647,7 @@ class PdfEditorDialog(QDialog):
 
         times = sorted(set(re.findall(r"\d{2}:\d{2}", first_text)))
         if not times:
-            QMessageBox.information(
-                self,
+            self.show_daacal_notification(
                 "No headings found",
                 "No time-like headings (HH:MM) were detected on the first page."
             )
@@ -3312,8 +3660,7 @@ class PdfEditorDialog(QDialog):
         selected = dlg.get_selected_labels()
         new_label = dlg.get_replace_text()
         if not selected or not new_label:
-            QMessageBox.information(
-                self,
+            self.show_daacal_notification(
                 "Nothing to do",
                 "Please select at least one heading and enter replacement text."
             )
@@ -3351,10 +3698,9 @@ class PdfEditorDialog(QDialog):
                 new_time_label=new_label,
             )
         except Exception as e:
-            QMessageBox.critical(
-                self,
+            self.show_daacal_notification(
                 "Error creating combined blister",
-                f"An error occurred while processing the PDF:\n{e}",
+                f"An error occurred while processing the PDF:<br>{e}"
             )
             return
 
@@ -3362,15 +3708,14 @@ class PdfEditorDialog(QDialog):
         self.pdf_path = out_path
         self.load_pdf(out_path)
 
-        QMessageBox.information(
-            self,
+        self.show_daacal_notification(
             "Combined blister created",
             (
-                f"Created:\n{out_path}\n\n"
-                f"Range: {overall_start} → {overall_end}\n"
-                f"Expiry: {overall_expiry}\n"
+                f"Created:<br>{out_path}<br><br>"
+                f"Range: {overall_start} → {overall_end}<br>"
+                f"Expiry: {overall_expiry}<br>"
                 f"Replaced headings: {', '.join(used)}"
-            ),
+            )
         )
 
     def combine_to_two_pages(self):
@@ -3404,10 +3749,9 @@ class PdfEditorDialog(QDialog):
                 new_time_label=new_label,
             )
         except Exception as e:
-            QMessageBox.critical(
-                self,
+            self.show_daacal_notification(
                 "Error creating combined blister",
-                f"An error occurred while processing the PDF:\n{e}",
+                f"An error occurred while processing the PDF:<br>{e}"
             )
             return
 
@@ -3415,17 +3759,15 @@ class PdfEditorDialog(QDialog):
         self.pdf_path = out_path
         self.load_pdf(out_path)
 
-        QMessageBox.information(
-            self,
+        self.show_daacal_notification(
             "Combined blister created",
             (
-                f"Created:\n{out_path}\n\n"
-                f"Range: {overall_start} → {overall_end}\n"
-                f"Expiry: {overall_expiry}\n"
+                f"Created:<br>{out_path}<br><br>"
+                f"Range: {overall_start} → {overall_end}<br>"
+                f"Expiry: {overall_expiry}<br>"
                 f"Replaced headings: {', '.join(used)}"
-            ),
+            )
         )
-
 
 
 def mondays_in_month(year: int, month: int):
@@ -3436,7 +3778,9 @@ def mondays_in_month(year: int, month: int):
         if d.month == month and d.weekday() == 0
     ]
 
+
 SINGLE_INSTANCE_KEY = "DAACAL_SINGLE_INSTANCE"
+
 
 def ensure_single_instance(server_name=SINGLE_INSTANCE_KEY):
     """
@@ -3459,6 +3803,7 @@ def ensure_single_instance(server_name=SINGLE_INSTANCE_KEY):
         return None
 
     return server
+
 
 def send_ipc_command(command: str, server_name: str = SINGLE_INSTANCE_KEY, timeout_ms: int = 500) -> bool:
     """
@@ -3484,6 +3829,7 @@ def attach_ipc_listener(server: QLocalServer, app: QApplication) -> None:
     Supported:
       - QUIT: gracefully exits this instance.
     """
+
     def on_new_connection():
         while server.hasPendingConnections():
             conn = server.nextPendingConnection()
@@ -3502,6 +3848,7 @@ def attach_ipc_listener(server: QLocalServer, app: QApplication) -> None:
 
     server.newConnection.connect(on_new_connection)
 
+
 class ClaimsWindow(QDialog):
     """
     Lists patients with partial_supply='Y'.
@@ -3510,6 +3857,7 @@ class ClaimsWindow(QDialog):
     - Month/Year picker auto-generates Monday start dates.
     - Export to Downloads as 'DAA Claims [Month YYYY].xlsx'
     """
+
     def __init__(self, parent, db_cursor):
         super().__init__(parent)
         self.setWindowTitle("DAA Claims")
@@ -3823,9 +4171,9 @@ class DBChangeHandler(FileSystemEventHandler):
             )
 
 
-
 class EditDrugsDialog(QDialog):
     drugs_updated = pyqtSignal()
+
     def __init__(self, patient_id, med_names, conn, parent=None):
         super().__init__(parent)
         self.setWindowModality(Qt.WindowModal)
@@ -3868,6 +4216,7 @@ class EditDrugsDialog(QDialog):
 
         # Add Drug button
         add_drug_btn = QPushButton("Add Drug")
+
         def handle_add_drug():
             new_drug, ok = QInputDialog.getText(self, "Add Drug", "Enter new drug name:")
             if not ok or not new_drug.strip():
@@ -3875,7 +4224,7 @@ class EditDrugsDialog(QDialog):
             new_drug = new_drug.strip()
             # Avoid duplicate entry in the dialog
             if any(lineedit.text().strip().lower() == new_drug.lower() for _, lineedit, _, _ in self.drug_entries):
-                QMessageBox.warning(self, "Duplicate", f"{new_drug} is already listed.")
+                self.show_daacal_notification( "Duplicate", f"{new_drug} is already listed.")
                 return
             checkbox = QCheckBox()
             checkbox.setChecked(True)
@@ -3887,6 +4236,7 @@ class EditDrugsDialog(QDialog):
             # Next available Excel row (4 + count)
             next_row = 4 + len(self.drug_entries)
             self.drug_entries.append((checkbox, lineedit, new_drug, next_row))
+
         add_drug_btn.clicked.connect(handle_add_drug)
         layout.addWidget(add_drug_btn)
 
@@ -3963,8 +4313,9 @@ class EditDrugsDialog(QDialog):
             return True
 
         except Exception as e:
-            QMessageBox.critical(self, "Save Drugs Error", str(e))
+            self.show_daacal_notification("Save Drugs Error", str(e))
             return False
+
 
 class OneBackspaceClearsLineEdit(QLineEdit):
     def keyPressEvent(self, event):
@@ -3972,6 +4323,7 @@ class OneBackspaceClearsLineEdit(QLineEdit):
             self.clear()
         else:
             super().keyPressEvent(event)
+
 
 class HighlightDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
@@ -3984,6 +4336,7 @@ class HighlightDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, QColor(240, 240, 240))
             painter.restore()
         super().paint(painter, option, index)
+
 
 class HighlightTableWidget(QTableWidget):
     def __init__(self, parent=None):
@@ -4010,10 +4363,12 @@ class HighlightTableWidget(QTableWidget):
         width = sum(self.columnWidth(col) for col in range(self.columnCount()))
         self.highlight_overlay.setGeometry(left, top, width, height)
 
+
 class CustomTabBar(QTabBar):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setTabsClosable(True)
+
     def tabSizeHint(self, index):
         size = super().tabSizeHint(index)
         size.setWidth(size.width() + 30)
@@ -4021,6 +4376,7 @@ class CustomTabBar(QTabBar):
         size = super().tabSizeHint(index)
         size.setWidth(size.width() + 30)
         return size
+
 
 def parse_batch_expiry(batch_exp):
     batch = ""
@@ -4049,20 +4405,29 @@ def parse_batch_expiry(batch_exp):
                         pass
     return batch, expiry
 
+
 USER_ID_MAP = {
-  "rc": "Ryan Chetty"
+    "rc": "Ryan Chetty"
 }
+
 
 def sync_user_map_to_db(conn):
     """Ensure the DB user list matches USER_ID_MAP and vice versa."""
     cur = conn.cursor()
     # Ensure users table exists
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL
-        )
-    """)
+                CREATE TABLE IF NOT EXISTS users
+                (
+                    user_id
+                    TEXT
+                    PRIMARY
+                    KEY,
+                    name
+                    TEXT
+                    NOT
+                    NULL
+                )
+                """)
     conn.commit()
 
     # Load DB users into dict
@@ -4083,6 +4448,7 @@ def sync_user_map_to_db(conn):
 
     conn.commit()
 
+
 # === Global Event Filter to Reset Inactivity Timer ===
 class GlobalActivityFilter(QObject):
     def __init__(self, main_app):
@@ -4094,6 +4460,7 @@ class GlobalActivityFilter(QObject):
             if hasattr(self.main_app, 'inactivity_timer'):
                 self.main_app.inactivity_timer.start()
         return False
+
 
 # === Per-user settings (saved locally on each PC/user) ===
 
@@ -4115,32 +4482,380 @@ def _save_daacal_settings(update: dict) -> None:
     settings.update(update or {})
     with open(_DAACAL_SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=4)
+
+
 # === Dynamic base directory resolution with settings override + fallback prompt ===
+
+def ensure_webster_database(db_path: str) -> None:
+    """
+    Creates/migrates webster_calendar.db so a fresh DAACal install can start.
+    Safe to run every startup.
+    """
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    os.makedirs(os.path.join(os.path.dirname(db_path), "collection logs"), exist_ok=True)
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    # -------------------------
+    # patients
+    # -------------------------
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS patients
+                (
+                    id
+                    INTEGER
+                    PRIMARY
+                    KEY
+                    AUTOINCREMENT,
+                    number
+                    INTEGER
+                    UNIQUE,
+                    charge
+                    TEXT
+                    DEFAULT
+                    'N',
+                    name
+                    TEXT
+                    NOT
+                    NULL,
+                    date_packed
+                    TEXT
+                    DEFAULT
+                    '',
+                    picked_up
+                    TEXT
+                    DEFAULT
+                    '',
+                    due_date
+                    TEXT
+                    DEFAULT
+                    '',
+                    days_till_due
+                    INTEGER,
+                    notes
+                    TEXT
+                    DEFAULT
+                    '',
+                    paused
+                    INTEGER
+                    DEFAULT
+                    0,
+                    flagged
+                    INTEGER
+                    DEFAULT
+                    0,
+                    ceased
+                    INTEGER
+                    DEFAULT
+                    0,
+                    pack_size
+                    TEXT
+                    DEFAULT
+                    'Large',
+                    partial_supply
+                    TEXT
+                    DEFAULT
+                    'N',
+                    checked_by
+                    TEXT
+                    DEFAULT
+                    '',
+                    packed_by
+                    TEXT
+                    DEFAULT
+                    '',
+                    given_out_by
+                    TEXT
+                    DEFAULT
+                    '',
+                    weeks_per_blister
+                    TEXT
+                    DEFAULT
+                    '4 weeks',
+                    medicare
+                    TEXT
+                    DEFAULT
+                    '',
+                    concession
+                    TEXT
+                    DEFAULT
+                    '',
+
+                    -- legacy compatibility columns
+                    pack_date
+                    TEXT
+                    DEFAULT
+                    '',
+                    collect_date
+                    TEXT
+                    DEFAULT
+                    '',
+                    given_by
+                    TEXT
+                    DEFAULT
+                    ''
+                )
+                """)
+
+    patient_columns = {
+        "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+        "number": "INTEGER UNIQUE",
+        "charge": "TEXT DEFAULT 'N'",
+        "name": "TEXT DEFAULT ''",
+        "date_packed": "TEXT DEFAULT ''",
+        "picked_up": "TEXT DEFAULT ''",
+        "due_date": "TEXT DEFAULT ''",
+        "days_till_due": "INTEGER",
+        "notes": "TEXT DEFAULT ''",
+        "paused": "INTEGER DEFAULT 0",
+        "flagged": "INTEGER DEFAULT 0",
+        "ceased": "INTEGER DEFAULT 0",
+        "pack_size": "TEXT DEFAULT 'Large'",
+        "partial_supply": "TEXT DEFAULT 'N'",
+        "checked_by": "TEXT DEFAULT ''",
+        "packed_by": "TEXT DEFAULT ''",
+        "given_out_by": "TEXT DEFAULT ''",
+        "weeks_per_blister": "TEXT DEFAULT '4 weeks'",
+        "medicare": "TEXT DEFAULT ''",
+        "concession": "TEXT DEFAULT ''",
+        "pack_date": "TEXT DEFAULT ''",
+        "collect_date": "TEXT DEFAULT ''",
+        "given_by": "TEXT DEFAULT ''",
+        "needs_entry": "INTEGER DEFAULT 0",
+    }
+
+    cur.execute("PRAGMA table_info(patients)")
+    existing_patient_cols = {row[1] for row in cur.fetchall()}
+
+    for col, definition in patient_columns.items():
+        if col not in existing_patient_cols and col != "id":
+            cur.execute(f"ALTER TABLE patients ADD COLUMN {col} {definition}")
+
+    # -------------------------
+    # notes_log
+    # -------------------------
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS notes_log
+                (
+                    id
+                    INTEGER
+                    PRIMARY
+                    KEY
+                    AUTOINCREMENT,
+                    patient_id
+                    INTEGER
+                    NOT
+                    NULL,
+                    note
+                    TEXT
+                    NOT
+                    NULL,
+                    timestamp
+                    TEXT
+                    NOT
+                    NULL
+                )
+                """)
+
+    # -------------------------
+    # users
+    # -------------------------
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS users
+                (
+                    user_id
+                    TEXT
+                    PRIMARY
+                    KEY,
+                    name
+                    TEXT
+                    NOT
+                    NULL
+                )
+                """)
+
+    cur.execute(
+        "INSERT OR IGNORE INTO users (user_id, name) VALUES (?, ?)",
+        ("rc", "Ryan Chetty")
+    )
+
+    # -------------------------
+    # patient_drug_status
+    # -------------------------
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS patient_drug_status
+                (
+                    patient_id
+                    INTEGER
+                    NOT
+                    NULL,
+                    drug_name
+                    TEXT
+                    NOT
+                    NULL,
+                    active
+                    INTEGER
+                    DEFAULT
+                    1,
+                    PRIMARY
+                    KEY
+                (
+                    patient_id,
+                    drug_name
+                )
+                    )
+                """)
+
+    # -------------------------
+    # MPS patient settings
+    # -------------------------
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS mps_patient_settings
+                (
+                    patient_name_norm
+                    TEXT
+                    PRIMARY
+                    KEY,
+                    patient_name_display
+                    TEXT
+                    DEFAULT
+                    '',
+                    weeks_per_blister
+                    INTEGER
+                    DEFAULT
+                    1,
+                    header_labels_json
+                    TEXT
+                    DEFAULT
+                    NULL,
+                    updated_at
+                    TEXT
+                    DEFAULT
+                    NULL,
+
+                    -- legacy compatibility columns
+                    patient_name
+                    TEXT
+                    DEFAULT
+                    '',
+                    header_json
+                    TEXT
+                    DEFAULT
+                    NULL,
+                    updated_ts
+                    TEXT
+                    DEFAULT
+                    NULL
+                )
+                """)
+
+    mps_cols = {
+        "patient_name_norm": "TEXT",
+        "patient_name_display": "TEXT DEFAULT ''",
+        "weeks_per_blister": "INTEGER DEFAULT 1",
+        "header_labels_json": "TEXT DEFAULT NULL",
+        "updated_at": "TEXT DEFAULT NULL",
+        "patient_name": "TEXT DEFAULT ''",
+        "header_json": "TEXT DEFAULT NULL",
+        "updated_ts": "TEXT DEFAULT NULL",
+    }
+
+    cur.execute("PRAGMA table_info(mps_patient_settings)")
+    existing_mps_cols = {row[1] for row in cur.fetchall()}
+
+    for col, definition in mps_cols.items():
+        if col not in existing_mps_cols:
+            cur.execute(f"ALTER TABLE mps_patient_settings ADD COLUMN {col} {definition}")
+
+    # -------------------------
+    # MPS header options
+    # -------------------------
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS mps_header_options
+                (
+                    option_text
+                    TEXT
+                    PRIMARY
+                    KEY
+                )
+                """)
+
+    for option in ["B'FAST", "BREAKFAST", "MORNING", "LUNCH", "DINNER", "BED"]:
+        cur.execute(
+            "INSERT OR IGNORE INTO mps_header_options(option_text) VALUES (?)",
+            (option,)
+        )
+
+    # -------------------------
+    # MPS header calibration
+    # -------------------------
+    cur.execute("""
+                CREATE TABLE IF NOT EXISTS mps_header_calibration
+                (
+                    id
+                    INTEGER
+                    PRIMARY
+                    KEY
+                    CHECK
+                (
+                    id =
+                    1
+                ),
+                    pad_x REAL DEFAULT 1.00,
+                    pad_y REAL DEFAULT 1.00,
+                    nudge_x REAL DEFAULT 0.00,
+                    nudge_y REAL DEFAULT 0.00
+                    )
+                """)
+
+    cur.execute("""
+                INSERT
+                OR IGNORE INTO mps_header_calibration
+        (id, pad_x, pad_y, nudge_x, nudge_y)
+        VALUES (1, 1.00, 1.00, 0.00, 0.00)
+                """)
+
+    conn.commit()
+    conn.close()
+
 
 def resolve_data_directory():
     settings = _load_daacal_settings()
     dir_candidate = (settings.get("data_directory") or "").strip()
 
-    if os.path.isdir(dir_candidate) and os.path.exists(os.path.join(dir_candidate, "webster_calendar.db")):
+    if os.path.isdir(dir_candidate):
+        db_path = os.path.join(dir_candidate, "webster_calendar.db")
+        ensure_webster_database(db_path)
+        _save_daacal_settings({"data_directory": dir_candidate})
         return dir_candidate
 
-    # Prompt user if DB file missing
     app = QApplication.instance() or QApplication([])
-    while True:
-        dir_selected = QFileDialog.getExistingDirectory(None, "Select Data Directory")
-        if not dir_selected:
-            QMessageBox.critical(None, "Missing DB", "No valid directory selected. DAACal will now exit.")
-            sys.exit(1)
 
-        if os.path.exists(os.path.join(dir_selected, "webster_calendar.db")):
-            _save_daacal_settings({"data_directory": dir_selected})
-            return dir_selected
+    dir_selected = QFileDialog.getExistingDirectory(
+        None,
+        "Select DAACal Data Directory"
+    )
 
-        QMessageBox.warning(None, "Invalid Directory", "Selected folder does not contain webster_calendar.db")
+    if not dir_selected:
+        QMessageBox.critical(
+            None,
+            "Missing Data Directory",
+            "No data directory selected. DAACal will now exit."
+        )
+        sys.exit(1)
+
+    db_path = os.path.join(dir_selected, "webster_calendar.db")
+    ensure_webster_database(db_path)
+    _save_daacal_settings({"data_directory": dir_selected})
+    return dir_selected
+
 
 BASE_DIR = resolve_data_directory()
 DB_FILE = os.path.join(BASE_DIR, 'webster_calendar.db')
 COLLECTION_LOGS_DIR = os.path.join(BASE_DIR, 'collection logs')
+
+
 # ===============================================================
 
 class DateItem(QTableWidgetItem):
@@ -4155,6 +4870,7 @@ class DateItem(QTableWidgetItem):
             return True
         return self_date < other_date
 
+
 class NumericItem(QTableWidgetItem):
     def __lt__(self, other):
         try:
@@ -4167,6 +4883,7 @@ class NumericItem(QTableWidgetItem):
             return True
         return self_val < other_val
 
+
 class NumericItem(QTableWidgetItem):
     def __lt__(self, other):
         try:
@@ -4175,6 +4892,7 @@ class NumericItem(QTableWidgetItem):
             return self_val < other_val
         except ValueError:
             return self.text() < other.text()
+
 
 class DateItem(QTableWidgetItem):
     def __lt__(self, other):
@@ -4190,8 +4908,10 @@ class DateItem(QTableWidgetItem):
 
         return self_date > other_date  # Descending
 
+
 class LandscapePrintPreview(QPrintPreviewDialog):
     """QPrintPreviewDialog that always re-applies landscape orientation before printing."""
+
     def __init__(self, printer, parent=None):
         super().__init__(printer, parent)
         self.printer = printer
@@ -4209,6 +4929,7 @@ class LandscapePrintPreview(QPrintPreviewDialog):
             )
         )
 
+
 class PrintPreviewDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -4223,7 +4944,6 @@ class PrintPreviewDialog(QDialog):
 
         # === Layout ===
         main_layout = QVBoxLayout()
-
 
         self.week_label = QLabel(f"Week Starting: {self.this_week_start}")
 
@@ -4290,6 +5010,7 @@ class PrintPreviewDialog(QDialog):
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+
 
     def populate_table(self, table, rows):
         table.setRowCount(0)
@@ -4469,18 +5190,13 @@ class PrintPreviewDialog(QDialog):
         printer_name = app.get_saved_printer()
 
         if not printer_name:
-            QMessageBox.warning(
-                self,
-                "Printer Not Set",
-                "Please set a default printer in the Manage menu before printing."
-            )
+            self.show_daacal_notification("Printer Not Set", "Please set a default printer in the Manage menu before printing.")
             return
 
         if printer_name not in available_printers:
-            QMessageBox.warning(
-                self,
+            self.show_daacal_notification(
                 "Printer Unavailable",
-                f"The saved printer '{printer_name}' is not currently available.\n"
+                f"The saved printer '{printer_name}' is not currently available.<br>"
                 f"Use Manage -> Refresh Printers, then Set Printer."
             )
             return
@@ -4527,7 +5243,7 @@ class PrintPreviewDialog(QDialog):
 
         # --- Logo ---
         icon_label = QLabel()
-        icon_path = os.path.join(BASE_DIR, "daacal.png")
+        icon_path = resource_path(os.path.join("daacal.png"))
         icon_pixmap = QPixmap()
         if os.path.exists(icon_path):
             icon_pixmap = QPixmap(icon_path).scaledToHeight(48, Qt.SmoothTransformation)
@@ -4576,8 +5292,8 @@ class PrintPreviewDialog(QDialog):
             self.apply_fixed_column_widths_print(self.preview_table, printer)
             table_width = sum(self.preview_table.columnWidth(i) for i in range(self.preview_table.columnCount()))
             table_height = (
-                self.preview_table.horizontalHeader().height()
-                + sum(self.preview_table.rowHeight(i) for i in range(self.preview_table.rowCount()))
+                    self.preview_table.horizontalHeader().height()
+                    + sum(self.preview_table.rowHeight(i) for i in range(self.preview_table.rowCount()))
             )
             self.preview_table.resize(table_width, table_height)
             painter.translate(left_margin_px, y_offset)
@@ -4593,8 +5309,8 @@ class PrintPreviewDialog(QDialog):
             self.apply_fixed_column_widths_print(self.overdue_table, printer)
             table_width = sum(self.overdue_table.columnWidth(i) for i in range(self.overdue_table.columnCount()))
             table_height = (
-                self.overdue_table.horizontalHeader().height()
-                + sum(self.overdue_table.rowHeight(i) for i in range(self.overdue_table.rowCount()))
+                    self.overdue_table.horizontalHeader().height()
+                    + sum(self.overdue_table.rowHeight(i) for i in range(self.overdue_table.rowCount()))
             )
             self.overdue_table.resize(table_width, table_height)
             painter.translate(left_margin_px, y_offset)
@@ -4605,7 +5321,6 @@ class PrintPreviewDialog(QDialog):
         painter.end()
         print("DEBUG: Direct print complete with balanced margins and reduced top gap.")
 
-
     def get_saved_printer(self):
         settings = _load_daacal_settings()
         saved_printer = (settings.get("default_printer") or "").strip()
@@ -4614,6 +5329,7 @@ class PrintPreviewDialog(QDialog):
         if saved_printer and saved_printer in available_printers:
             return saved_printer
         return ""
+
 
 class PrinterRefreshWorker(QObject):
     finished = pyqtSignal(list, object)  # (infos, error)
@@ -4625,10 +5341,320 @@ class PrinterRefreshWorker(QObject):
             self.finished.emit(infos, None)
         except Exception as e:
             self.finished.emit([], e)
+class AnimatedGifIconDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None, icon_size=24):
+        super().__init__(parent)
+        self.icon_size = icon_size
+        self.movies = {}
 
+    def get_movie(self, path):
+        if path not in self.movies:
+            movie = QMovie(path)
+            movie.setScaledSize(QSize(self.icon_size, self.icon_size))
+            movie.frameChanged.connect(self.repaint_parent)
+            movie.start()
+            self.movies[path] = movie
+
+        return self.movies[path]
+
+    def repaint_parent(self):
+        parent = self.parent()
+        if parent:
+            parent.viewport().update()
+
+    def paint(self, painter, option, index):
+        icon_path = index.data(Qt.UserRole)
+
+        if not icon_path or not isinstance(icon_path, str):
+            return super().paint(painter, option, index)
+
+        if not os.path.exists(icon_path):
+            return
+
+        if icon_path.lower().endswith(".gif"):
+            movie = self.get_movie(icon_path)
+            pixmap = movie.currentPixmap()
+
+            if pixmap.isNull():
+                return
+
+            rect = option.rect
+            x = rect.x() + (rect.width() - pixmap.width()) // 2
+            y = rect.y() + (rect.height() - pixmap.height()) // 2
+
+            painter.drawPixmap(x, y, pixmap)
+            return
+
+        return super().paint(painter, option, index)
 
 class WebsterCalendarApp(QMainWindow):
     db_changed_signal = pyqtSignal()
+
+    def open_calendar_row_context_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+
+        self.table.selectRow(row)
+        self.table.setCurrentCell(row, 1)
+
+        if not self.enforce_login():
+            return
+
+        number_item = self.table.item(row, 1)
+        if not number_item:
+            return
+
+        number = number_item.text().strip()
+        if not number:
+            return
+
+        self.cur.execute("""
+                         SELECT date_packed, picked_up, due_date, packed_by, checked_by, needs_entry
+                         FROM patients
+                         WHERE number = ?
+                         """, (number,))
+        result = self.cur.fetchone()
+        if not result:
+            return
+
+        date_packed = str(result[0] or "").strip()
+        picked_up = str(result[1] or "").strip()
+        due_date = str(result[2] or "").strip()
+        packed_by = str(result[3] or "").strip()
+        checked_by = str(result[4] or "").strip()
+        needs_entry = int(result[5] or 0)
+
+        is_green_row = bool(date_packed) and not picked_up and not due_date
+        has_needs_checking_icon = bool(packed_by) and not checked_by and not needs_entry
+        has_needs_entering_icon = bool(needs_entry)
+
+        menu = QtWidgets.QMenu(self)
+
+        create_entry_action = None
+        mark_checked_action = None
+        collected_action = None
+        manual_due_date_action = None
+
+        create_entry_action = menu.addAction("Create entry")
+
+        if has_needs_checking_icon:
+            mark_checked_action = menu.addAction("Mark as Checked")
+
+        elif is_green_row:
+            collected_action = menu.addAction("Collected")
+
+        else:
+            mark_checked_action = menu.addAction("Mark as Checked")
+
+        if not is_green_row:
+            manual_due_date_action = menu.addAction("Set manual due date")
+
+        selected = menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+        if selected is None:
+            return
+
+        if selected == create_entry_action:
+            self.table.selectRow(row)
+            self.table.setCurrentCell(row, 1)
+            self.handle_new_packed_action()
+            return
+
+        if selected == collected_action:
+            self.table.selectRow(row)
+            self.table.setCurrentCell(row, 1)
+            self.handle_collected_action()
+            return
+
+        if selected == manual_due_date_action:
+            self.show_manual_due_date_dialog(number)
+            return
+
+        if selected == mark_checked_action:
+            if has_needs_checking_icon:
+                self.mark_existing_pack_checked(number)
+            else:
+                self.mark_checked_needs_pack_entry(number)
+            return
+
+    def show_manual_due_date_dialog(self, number):
+
+        self.cur.execute("SELECT name FROM patients WHERE number = ?", (number,))
+        result = self.cur.fetchone()
+        patient_name = result[0] if result else "Unknown"
+
+        dialog = QDialog(self, Qt.FramelessWindowHint | Qt.Dialog)
+        dialog.setWindowTitle("Modify due date")
+        dialog.setModal(True)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #F4F1EC;
+                border: 2px solid #333333;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: #111111;
+                font-size: 13px;
+            }
+            QPushButton {
+                padding: 6px 14px;
+                border: 1px solid #333333;
+                border-radius: 6px;
+                background-color: #ffffff;
+            }
+            QPushButton:hover {
+                background-color: #e8e2d8;
+            }
+            QDateEdit {
+                padding: 6px;
+                border: 1px solid #333333;
+                border-radius: 6px;
+                background-color: #ffffff;
+            }
+        """)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        top_bar = QHBoxLayout()
+
+        title_label = QLabel("Modify due date")
+        title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+
+        close_button = QPushButton("×")
+        close_button.setFixedSize(24, 24)
+        close_button.setStyleSheet("""
+            QPushButton {
+                border: none;
+                background: transparent;
+                font-size: 14px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #e8e2d8;
+                border-radius: 4px;
+            }
+            QPushButton:focus {
+                outline: none;
+            }
+        """)
+
+        close_button.clicked.connect(dialog.reject)
+
+        top_bar.addWidget(title_label)
+        top_bar.addStretch()
+        top_bar.addWidget(close_button)
+
+        layout.addLayout(top_bar)
+
+        name_label = QLabel(str(patient_name).title())
+        name_label.setStyleSheet("font-size: 13px;")
+        layout.addWidget(name_label)
+
+        date_edit = QDateEdit()
+        date_edit.setCalendarPopup(True)
+        date_edit.setDisplayFormat("dd/MM/yyyy")
+        date_edit.setDate(QDate.currentDate())
+        layout.addWidget(date_edit)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+
+        confirm_button = QPushButton("Confirm")
+        cancel_button = QPushButton("Cancel")
+
+        button_row.addWidget(confirm_button)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+        def confirm_due_date():
+            due_date = date_edit.date().toString("dd/MM/yyyy")
+
+            self.cur.execute("""
+                UPDATE patients
+                SET due_date = ?
+                WHERE number = ?
+            """, (due_date, number))
+
+            self.conn.commit()
+            dialog.accept()
+            self.load_data()
+
+            self.cur.execute("SELECT name FROM patients WHERE number = ?", (number,))
+            result = self.cur.fetchone()
+            patient_name = result[0] if result else "Unknown"
+
+            self.show_daacal_notification(
+                "Due date modified",
+                f"{str(patient_name).title()}<br>Manual due date set to {due_date}."
+            )
+
+        confirm_button.clicked.connect(confirm_due_date)
+        cancel_button.clicked.connect(dialog.reject)
+
+        dialog.adjustSize()
+
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, dialog.width(), dialog.height(), 10, 10)
+        region = QRegion(path.toFillPolygon().toPolygon())
+        dialog.setMask(region)
+
+        screen = QApplication.primaryScreen().availableGeometry()
+        x = screen.center().x() - dialog.width() // 2
+        y = screen.center().y() - dialog.height() // 2
+        dialog.move(x, y)
+
+        dialog.exec_()
+
+    def mark_checked_needs_pack_entry(self, number):
+        if not self.enforce_login():
+            return
+
+        checker_id = getattr(self, "active_user_id", "") or ""
+        checker_id = checker_id.strip().upper()
+
+        if not checker_id:
+            self.show_daacal_notification("Login Required", "No logged-in checker ID found.")
+            return
+
+        today = datetime.today().strftime("%d/%m/%Y")
+
+        self.cur.execute("""
+                         UPDATE patients
+                         SET date_packed = ?,
+                             picked_up   = NULL,
+                             due_date    = NULL,
+                             packed_by   = '',
+                             checked_by  = ?,
+                             needs_entry = 1
+                         WHERE number = ?
+                         """, (today, checker_id, number))
+
+        self.conn.commit()
+        self.load_data()
+
+    def mark_existing_pack_checked(self, number):
+        if not self.enforce_login():
+            return
+
+        checker_id = getattr(self, "active_user_id", "") or ""
+        checker_id = checker_id.strip().upper()
+
+        if not checker_id:
+            self.show_daacal_notification( "Login Required", "No logged-in checker ID found.")
+            return
+
+        self.cur.execute("""
+                         UPDATE patients
+                         SET checked_by = ?,
+                             needs_entry = 0
+                         WHERE number = ?
+                         """, (checker_id, number))
+
+        self.conn.commit()
+        self.load_data()
 
     def _startup_step(self, text):
         splash = getattr(self, "splash", None)
@@ -4636,6 +5662,7 @@ class WebsterCalendarApp(QMainWindow):
             splash.raise_()
             splash.activateWindow()
             QApplication.processEvents()
+
     def showEvent(self, event):
         super().showEvent(event)
 
@@ -4645,6 +5672,7 @@ class WebsterCalendarApp(QMainWindow):
 
         self.splash = None
         QTimer.singleShot(150, splash.close)
+
     def _apply_printer_cache(self, infos):
         """
         Apply a freshly enumerated printer list to cache.
@@ -4838,17 +5866,9 @@ class WebsterCalendarApp(QMainWindow):
                 mps_combo.blockSignals(False)
 
             if error is not None:
-                QMessageBox.warning(
-                    self._printer_dialog,
-                    "Printer Refresh Failed",
-                    f"Could not refresh printers.\n\n{error}"
-                )
+                self.show_daacal_notification("Printer Refresh Failed", f"Could not refresh printers.<br><br>{error}")
             elif not self._cached_printers:
-                QMessageBox.warning(
-                    self._printer_dialog,
-                    "No Printers Found",
-                    "No printers are currently available."
-                )
+                self.show_daacal_notification("No Printers Found", "No printers are currently available.")
 
         self._cleanup_printer_refresh_thread()
 
@@ -5030,11 +6050,11 @@ class WebsterCalendarApp(QMainWindow):
             return
 
         if not default_chosen:
-            QMessageBox.warning(self, "No Printer Selected", "Please select a default printer.")
+            self.show_daacal_notification( "No Printer Selected", "Please select a default printer.")
             return
 
         if not mps_chosen:
-            QMessageBox.warning(self, "No MPS Printer Selected", "Please select an MPS default printer.")
+            self.show_daacal_notification( "No MPS Printer Selected", "Please select an MPS default printer.")
             return
 
         _save_daacal_settings({
@@ -5119,7 +6139,6 @@ class WebsterCalendarApp(QMainWindow):
 
         dlg = PdfEditorDialog(self, pdf_path)
         dlg.exec_()
-
 
     def to_db_name(self, display_name):
         # Convert "First Last" → "Last, First"
@@ -5259,12 +6278,507 @@ class WebsterCalendarApp(QMainWindow):
         if name:
             self.packer_input.setText(name)
 
+    def show_daacal_notification(self, title, message, duration_ms=4500):
+        if not hasattr(self, "daacal_notifications"):
+            self.daacal_notifications = []
+
+        note = QDialog(self, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        note.setAttribute(Qt.WA_DeleteOnClose)
+        note.setStyleSheet("""
+            QDialog {
+                background-color: #F4F1EC;
+                border: 2px solid #333333;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: #111111;
+            }
+        """)
+
+        layout = QHBoxLayout(note)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
+
+        logo_label = QLabel()
+        logo_path = resource_path("DAACal.png")
+        if not os.path.exists(logo_path):
+            logo_path = resource_path("DAACal.ico")
+
+        if os.path.exists(logo_path):
+            logo_label.setPixmap(
+                QPixmap(logo_path).scaled(
+                    42, 42, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+            )
+
+        layout.addWidget(logo_label)
+
+        text_label = QLabel(f"<b>{title}</b><br>{message}")
+        text_label.setWordWrap(True)
+        text_label.setMinimumWidth(260)
+        layout.addWidget(text_label)
+
+        note.adjustSize()
+
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, note.width(), note.height(), 10, 10)
+        region = QRegion(path.toFillPolygon().toPolygon())
+        note.setMask(region)
+
+        self.daacal_notifications.append(note)
+
+        while len(self.daacal_notifications) > 4:
+            old_note = self.daacal_notifications.pop(0)
+            self.fade_out_daacal_notification(old_note)
+
+        def reposition_notifications():
+            screen = QApplication.primaryScreen().availableGeometry()
+            margin = 20
+            gap = 10
+
+            y = screen.bottom() - margin
+
+            for n in reversed(self.daacal_notifications):
+                if n is None or not n.isVisible():
+                    continue
+
+                x = screen.right() - n.width() - margin
+                y -= n.height()
+                n.move(x, y)
+                y -= gap
+
+        def remove_notification():
+            if note in self.daacal_notifications:
+                self.daacal_notifications.remove(note)
+                self.fade_out_daacal_notification(note)
+                reposition_notifications()
+
+        note.destroyed.connect(lambda: (
+            self.daacal_notifications.remove(note)
+            if note in self.daacal_notifications
+            else None
+        ))
+
+        note.show()
+        reposition_notifications()
+
+        QTimer.singleShot(duration_ms, remove_notification)
+
+    def fade_out_daacal_notification(self, note):
+        if note is None:
+            return
+
+        animation = QPropertyAnimation(note, b"windowOpacity", self)
+        animation.setDuration(500)
+        animation.setStartValue(1.0)
+        animation.setEndValue(0.0)
+
+        animation.finished.connect(note.close)
+
+        note._fade_animation = animation
+        animation.start()
+
+    def open_version_window(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Program Settings")
+        dlg.resize(760, 560)
+
+        layout = QVBoxLayout(dlg)
+
+        title = QLabel("<b>Program Settings</b>")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        current_label = QLabel(f"Installed version: {APP_VERSION}")
+        layout.addWidget(current_label)
+
+        # -------------------------
+        # Site section
+        # -------------------------
+        site_group = QGroupBox("Site")
+        site_layout = QHBoxLayout(site_group)
+
+        site_input = QLineEdit(get_site_name())
+        save_site_btn = QPushButton("Save Site")
+
+        site_layout.addWidget(QLabel("Site name:"))
+        site_layout.addWidget(site_input)
+        site_layout.addWidget(save_site_btn)
+
+        layout.addWidget(site_group)
+
+        def save_site():
+            set_site_name(site_input.text())
+            self.site_bar.setText(f'"{get_site_name()}')
+            self.show_daacal_notification("Site Saved", "Site name saved.")
+        save_site_btn.clicked.connect(save_site)
+
+        # -------------------------
+        # Server update section
+        # -------------------------
+        server_group = QGroupBox("Server Folder Update")
+        server_layout = QVBoxLayout(server_group)
+
+        server_status = QLabel("Not checked.")
+        server_status.setWordWrap(True)
+        server_layout.addWidget(server_status)
+
+        server_buttons = QHBoxLayout()
+        check_server_btn = QPushButton("Check Server")
+        update_server_btn = QPushButton("Update from Server")
+        open_folder_btn = QPushButton("Open Update Folder")
+        update_server_btn.setEnabled(False)
+
+        server_buttons.addWidget(check_server_btn)
+        server_buttons.addWidget(update_server_btn)
+        server_buttons.addWidget(open_folder_btn)
+        server_layout.addLayout(server_buttons)
+
+        layout.addWidget(server_group)
+
+        # -------------------------
+        # GitHub / Python update section
+        # -------------------------
+        github_group = QGroupBox("Python / GitHub Update")
+        github_layout = QVBoxLayout(github_group)
+
+        github_status = QLabel("Not checked.")
+        github_status.setWordWrap(True)
+        github_layout.addWidget(github_status)
+
+        github_buttons = QHBoxLayout()
+        check_github_btn = QPushButton("Check GitHub")
+        update_github_btn = QPushButton("Update from GitHub")
+        update_github_btn.setEnabled(False)
+
+        github_buttons.addWidget(check_github_btn)
+        github_buttons.addWidget(update_github_btn)
+        github_layout.addLayout(github_buttons)
+
+        layout.addWidget(github_group)
+
+        # -------------------------
+        # DB backup section
+        # -------------------------
+        backup_group = QGroupBox("Database Backup / Import / Rollback")
+        backup_layout = QVBoxLayout(backup_group)
+
+        backup_status = QLabel(f"Backup folder: {get_backup_dir()}")
+        backup_status.setWordWrap(True)
+        backup_layout.addWidget(backup_status)
+
+        backup_list = QListWidget()
+        backup_layout.addWidget(backup_list)
+
+        backup_buttons = QHBoxLayout()
+        backup_now_btn = QPushButton("Backup Now")
+        import_db_btn = QPushButton("Import .db / .dp")
+        rollback_btn = QPushButton("Roll Back Selected")
+        open_backup_folder_btn = QPushButton("Open Backup Folder")
+
+        backup_buttons.addWidget(backup_now_btn)
+        backup_buttons.addWidget(import_db_btn)
+        backup_buttons.addWidget(rollback_btn)
+        backup_buttons.addWidget(open_backup_folder_btn)
+        backup_layout.addLayout(backup_buttons)
+
+        layout.addWidget(backup_group)
+
+        close_btn = QPushButton("Close")
+        layout.addWidget(close_btn)
+
+        state = {
+            "server_info": None,
+            "github_info": None,
+        }
+
+        def refresh_backups():
+            backup_list.clear()
+            for mtime, name, path in list_db_backups():
+                item = QListWidgetItem(f"{datetime.fromtimestamp(mtime).strftime('%d/%m/%Y %H:%M')}   {name}")
+                item.setData(Qt.UserRole, path)
+                backup_list.addItem(item)
+
+        def check_server():
+            global LAST_SERVER_UPDATE_INFO, LAST_UPDATE_CHECK_TIME
+
+            info = get_server_update_info()
+            state["server_info"] = info
+            LAST_SERVER_UPDATE_INFO = info
+            LAST_UPDATE_CHECK_TIME = datetime.now()
+
+            checked_text = LAST_UPDATE_CHECK_TIME.strftime("%d/%m/%Y %H:%M")
+
+            version = info.get("version") or "None"
+            status = info.get("status") or ""
+            path = info.get("path") or ""
+
+            newer = info.get("available") and is_newer_version(version, APP_VERSION)
+            update_server_btn.setEnabled(bool(newer))
+
+            server_status.setText(
+                f"Server version: {version}\n"
+                f"Status: {'Update available.' if newer else status}\n"
+                f"Folder: {path}\n"
+                f"Last checked: {checked_text}"
+            )
+
+        def check_github():
+            global LAST_GITHUB_UPDATE_INFO, LAST_UPDATE_CHECK_TIME
+
+            info = get_github_update_info()
+            state["github_info"] = info
+            LAST_GITHUB_UPDATE_INFO = info
+            LAST_UPDATE_CHECK_TIME = datetime.now()
+
+            checked_text = LAST_UPDATE_CHECK_TIME.strftime("%d/%m/%Y %H:%M")
+
+            version = info.get("version") or "None"
+            status = info.get("status") or ""
+
+            newer = info.get("available") and is_newer_version(version, APP_VERSION)
+            update_github_btn.setEnabled(bool(newer))
+
+            github_status.setText(
+                f"GitHub version: {version}\n"
+                f"Status: {'Update available.' if newer else status}\n"
+                f"Last checked: {checked_text}"
+            )
+
+            if not info.get("available") and status:
+                self.show_daacal_notification("GitHub update check failed", status)
+        def apply_cached_update_status():
+            global LAST_SERVER_UPDATE_INFO, LAST_GITHUB_UPDATE_INFO, LAST_UPDATE_CHECK_TIME
+
+            checked_text = ""
+            if LAST_UPDATE_CHECK_TIME:
+                checked_text = f"\nLast checked: {LAST_UPDATE_CHECK_TIME.strftime('%d/%m/%Y %H:%M')}"
+
+            if LAST_SERVER_UPDATE_INFO:
+                info = LAST_SERVER_UPDATE_INFO
+                version = info.get("version") or "None"
+                status = info.get("status") or ""
+                path = info.get("path") or ""
+                newer = info.get("available") and is_newer_version(version, APP_VERSION)
+                update_server_btn.setEnabled(bool(newer))
+
+                server_status.setText(
+                    f"Server version: {version}\n"
+                    f"Status: {'Update available.' if newer else status}\n"
+                    f"Folder: {path}"
+                    f"{checked_text}"
+                )
+
+            if LAST_GITHUB_UPDATE_INFO:
+                info = LAST_GITHUB_UPDATE_INFO
+                version = info.get("version") or "None"
+                status = info.get("status") or ""
+                newer = info.get("available") and is_newer_version(version, APP_VERSION)
+                update_github_btn.setEnabled(bool(newer))
+
+                github_status.setText(
+                    f"GitHub version: {version}\n"
+                    f"Status: {'Update available.' if newer else status}"
+                    f"{checked_text}"
+                )
+
+        def update_server():
+            info = state.get("server_info") or get_server_update_info()
+            if not info.get("available"):
+                self.show_daacal_notification("Server Update", info.get("status", "Server update unavailable."))
+                return
+            if not is_newer_version(info.get("version", ""), APP_VERSION):
+                self.show_daacal_notification("Server Update", "No newer server update is available.")
+                return
+            if prompt_for_update(dlg, info["version"], source="Server folder"):
+                start_update_from_info(dlg, info)
+
+        def update_github():
+            info = state.get("github_info") or get_github_update_info()
+            if not info.get("available"):
+                self.show_daacal_notification(
+                    "GitHub unavailable",
+                    info.get("status", "GitHub unavailable.")
+                )
+                return
+            if not is_newer_version(info.get("version", ""), APP_VERSION):
+                self.show_daacal_notification("GitHub Update", "No newer GitHub update is available.")
+                return
+            if prompt_for_update(dlg, info["version"], source="GitHub"):
+                start_update_from_info(dlg, info)
+
+        def open_update_folder():
+            folder = get_server_update_dir()
+            try:
+                os.startfile(folder)
+            except Exception as e:
+                self.show_daacal_notification("Open Folder Failed", str(e))
+
+        def backup_now():
+            try:
+                path = backup_current_db(reason="manual")
+                backup_status.setText(f"Backup created:\n{path}")
+                refresh_backups()
+            except Exception as e:
+                self.show_daacal_notification("Backup Failed", str(e))
+
+        def import_db():
+            file_path, _ = QFileDialog.getOpenFileName(
+                dlg,
+                "Import DAACal Database",
+                BASE_DIR,
+                "Database Files (*.db *.dp);;All Files (*.*)"
+            )
+            if not file_path:
+                return
+
+            reply = QMessageBox.warning(
+                dlg,
+                "Import Database",
+                "This will replace the current live database.\n\n"
+                "A safety backup will be created first.\n\n"
+                "Continue?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+
+            if reply != QMessageBox.Yes:
+                return
+
+            try:
+                if hasattr(self, "conn"):
+                    try:
+                        self.conn.commit()
+                        self.conn.close()
+                    except Exception:
+                        pass
+
+                safety = replace_live_db_from_file(file_path)
+
+                self.conn = sqlite3.connect(DB_FILE)
+                self.cur = self.conn.cursor()
+                self.site_bar.setText(f'{get_site_name()}')
+
+                backup_status.setText(
+                    f"Imported database:\n{file_path}\n\n"
+                    f"Safety backup created:\n{safety}"
+                )
+
+                refresh_backups()
+                self.load_data(
+                    ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+                )
+
+
+            except Exception as e:
+
+                QMessageBox.critical(
+
+                    dlg,
+
+                    "Import Failed",
+
+                    f"Selected file:\n{file_path}\n\n"
+
+                    f"Live database:\n{DB_FILE}\n\n"
+
+                    f"Error:\n{type(e).__name__}: {e}"
+
+                )
+
+        def rollback_selected():
+            item = backup_list.currentItem()
+            if not item:
+                self.show_daacal_notification("Rollback", "Select a backup first.")
+                return
+
+            path = item.data(Qt.UserRole)
+
+            reply = QMessageBox.warning(
+                dlg,
+                "Roll Back Database",
+                f"This will replace the current live database with:\n\n{path}\n\n"
+                "A safety backup will be created first.\n\n"
+                "Continue?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+
+            if reply != QMessageBox.Yes:
+                return
+
+            try:
+                if hasattr(self, "conn"):
+                    try:
+                        self.conn.commit()
+                        self.conn.close()
+                    except Exception:
+                        pass
+
+                safety = replace_live_db_from_file(path)
+
+                self.conn = sqlite3.connect(DB_FILE)
+                self.cur = self.conn.cursor()
+                self.site_bar.setText(f'{get_site_name()}')
+
+                backup_status.setText(
+                    f"Rolled back to:\n{path}\n\n"
+                    f"Safety backup created:\n{safety}"
+                )
+
+                refresh_backups()
+                self.load_data(
+                    ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+                )
+
+
+            except Exception as e:
+
+                QMessageBox.critical(
+
+                    dlg,
+
+                    "Rollback Failed",
+
+                    f"Selected backup:\n{path}\n\n"
+
+                    f"Live database:\n{DB_FILE}\n\n"
+
+                    f"Error:\n{type(e).__name__}: {e}"
+
+                )
+
+        def open_backup_folder():
+            try:
+                os.startfile(get_backup_dir())
+            except Exception as e:
+                self.show_daacal_notification("Open Folder Failed", str(e))
+
+        check_server_btn.clicked.connect(check_server)
+        update_server_btn.clicked.connect(update_server)
+        open_folder_btn.clicked.connect(open_update_folder)
+
+        check_github_btn.clicked.connect(check_github)
+        update_github_btn.clicked.connect(update_github)
+        apply_cached_update_status()
+
+        backup_now_btn.clicked.connect(backup_now)
+        import_db_btn.clicked.connect(import_db)
+        rollback_btn.clicked.connect(rollback_selected)
+        open_backup_folder_btn.clicked.connect(open_backup_folder)
+
+        close_btn.clicked.connect(dlg.close)
+
+        check_server()
+        refresh_backups()
+
+        dlg.exec_()
     def set_data_directory(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Data Directory")
         if directory:
             _save_daacal_settings({"data_directory": directory})
-            QMessageBox.information(self, "Saved", "Directory set to: " + directory + "\nRestart DAACal to apply.")
-
+            self.show_daacal_notification(
+                "Saved",
+                "Directory set to:<br>" + directory + "<br>Restart DAACal to apply."
+            )
     def open_edit_drugs_dialog(self):
         print("DEBUG: open_edit_drugs_dialog called")
         try:
@@ -5332,8 +6846,8 @@ class WebsterCalendarApp(QMainWindow):
 
             # --- Repopulate pack-entry table + restore cached values (only if pack-entry exists) ---
             if self._pack_entry_is_live():
-                self.repopulate_pack_entry_drug_table(active_med_names, self.current_patient_id, self.pack_entry_ws)
-
+                self.repopulate_pack_entry_drug_table(self.current_med_names, self.current_patient_id,
+                                                      self.pack_entry_ws)
                 table = self.pack_entry_drug_table
                 for r in range(table.rowCount()):
                     drug_item = table.item(r, 0)
@@ -5355,7 +6869,8 @@ class WebsterCalendarApp(QMainWindow):
                 print("DEBUG: Pack table restored successfully after Edit Drugs dialog.")
 
         except Exception as e:
-            QMessageBox.critical(self, "Edit Active Drugs Error", str(e))
+            self.show_daacal_notification("Edit Active Drugs Error", str(e))
+
     def populate_drugs_table(self, med_names):
         if not hasattr(self, 'pack_entry_drug_table'):
             print("ERROR: No pack_entry_drug_table to update")
@@ -5541,7 +7056,7 @@ class WebsterCalendarApp(QMainWindow):
                 # rebuild table widget completely
                 self.table = QTableWidget()
                 self.table.verticalHeader().setVisible(False)
-                self.table.cellClicked.connect(self.handle_warning_click)
+                #self.table.cellClicked.connect(self.handle_warning_click)
                 self.table.cellPressed.connect(self.table_mouse_click)
                 self.table.cellDoubleClicked.connect(self.open_patient_tab)
                 self.layout.addWidget(self.table)
@@ -5583,7 +7098,6 @@ class WebsterCalendarApp(QMainWindow):
             ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
         )
 
-
     def __init__(self, splash=None):
         self.splash = splash
 
@@ -5595,6 +7109,8 @@ class WebsterCalendarApp(QMainWindow):
         self.redo_stack = []
 
         super().__init__()
+
+        self.daacal_notifications = []
 
         self._startup_step("Loading DAACal...\nStarting up...")
 
@@ -5608,22 +7124,23 @@ class WebsterCalendarApp(QMainWindow):
 
         # === Set Window Title & Icon from data directory ===
         self.setWindowTitle("DAACal")
-        icon_path = os.path.join(BASE_DIR, "daacal.ico")
+        icon_path = resource_path(os.path.join("daacal.ico"))
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         else:
             print(f"WARNING: Icon not found at {icon_path}")
 
         # Establish database connection AFTER directory is resolved
-        if not os.path.exists(DB_FILE):
-            QMessageBox.warning(self, "Missing DB", "webster_calendar.db not found. Please select a valid directory.")
-            self.set_data_directory()
-            return
+        ensure_webster_database(DB_FILE)
 
         self._startup_step("Loading DAACal...\nOpening database...")
 
         self.conn = sqlite3.connect(DB_FILE)
         self.cur = self.conn.cursor()
+        try:
+            daily_db_backup_if_needed()
+        except Exception as e:
+            print("DEBUG: Daily DB backup failed:", e)
 
         # --- MPS PDF wizard remembered settings (per patient) ---
         self.cur.execute("""
@@ -5703,7 +7220,7 @@ class WebsterCalendarApp(QMainWindow):
                              """)
             self.conn.commit()
         except Exception as e:
-            QMessageBox.critical(self, "DB Error", "Failed to create patients table:\n" + str(e))
+            self.show_daacal_notification("DB Error", "Failed to create patients table:<br>" + str(e))
             return
 
         self._startup_step("Loading DAACal...\nChecking database structure...")
@@ -5723,7 +7240,6 @@ class WebsterCalendarApp(QMainWindow):
         rect = QApplication.primaryScreen().availableGeometry()
         self.setGeometry(rect)
 
-
         self._startup_step("Loading DAACal...\nBuilding window...")
 
         self.tabs = QTabWidget()
@@ -5737,10 +7253,37 @@ class WebsterCalendarApp(QMainWindow):
         self.main_widget.setLayout(self.layout)
         self.tabs.addTab(self.main_widget, "Calendar")
 
+        self.site_bar = QLabel(f'{get_site_name()}')
+        self.site_bar.setAlignment(Qt.AlignLeft)
+        self.site_bar.setStyleSheet("""
+            QLabel {
+                background: #EDEDED;
+                color: #111111;
+                font-weight: 700;
+                font-size: 7pt;
+                padding: 5px;
+                border-bottom: 1px solid #BDBDBD;
+            }
+        """)
+
         self.menu_bar = QMenuBar()
-        self.setMenuBar(self.menu_bar)
+
+        menu_wrapper = QWidget()
+        menu_layout = QVBoxLayout(menu_wrapper)
+        menu_layout.setContentsMargins(0, 0, 0, 0)
+        menu_layout.setSpacing(0)
+        menu_layout.addWidget(self.site_bar)
+        menu_layout.addWidget(self.menu_bar)
+
+        self.setMenuWidget(menu_wrapper)
 
         manage_menu = self.menu_bar.addMenu("Manage")
+
+        self.version_action = QAction("Settings", self)
+        self.version_action.triggered.connect(self.open_version_window)
+        manage_menu.addAction(self.version_action)
+        manage_menu.addSeparator()
+
         self.manage_users_action = QAction("Users", self)
         self.manage_users_action.triggered.connect(self.open_users_page)
         self.manage_patients_action = QAction("Patients", self)
@@ -5807,8 +7350,7 @@ class WebsterCalendarApp(QMainWindow):
         self.checked_button.clicked.connect(self.handle_checked_action)
 
         self.new_packed_button = QPushButton('Pack')
-        self.new_packed_button.clicked.connect(self.handle_new_packed_action)
-
+        self.new_packed_button.clicked.connect(lambda: self.handle_new_packed_action())
         self.collected_button = QPushButton('Collected')
         self.collected_button.clicked.connect(self.handle_collected_action)
 
@@ -5838,7 +7380,7 @@ class WebsterCalendarApp(QMainWindow):
 
         self.table = QTableWidget()
         self.table.verticalHeader().setVisible(False)
-        self.table.cellClicked.connect(self.handle_warning_click)
+        #self.table.cellClicked.connect(self.handle_warning_click)
         self.table.cellPressed.connect(self.table_mouse_click)
         self.table.cellDoubleClicked.connect(self.open_patient_tab)
         self.layout.addWidget(self.table)
@@ -5853,6 +7395,7 @@ class WebsterCalendarApp(QMainWindow):
 
         self.update_button_states()
         self.active_user = None
+        self._update_checked_this_session = False
         self.login_input.returnPressed.connect(self.assign_active_user)
 
         self.inactivity_timer = QTimer()
@@ -5884,6 +7427,22 @@ class WebsterCalendarApp(QMainWindow):
 
         self._startup_step("Loading DAACal...\nFinalising...")
 
+        self.run_startup_update_check()
+
+    def run_startup_update_check(self):
+        if self._update_checked_this_session:
+            return
+
+        self._update_checked_this_session = True
+
+        def do_check():
+            try:
+                check_for_update_only(self)
+            except Exception as e:
+                print("Startup update check failed:", e)
+
+        QTimer.singleShot(2000, do_check)
+
     def clear_active_user_due_to_timeout(self):
         self.active_user = None
         self.login_input.clear()
@@ -5895,19 +7454,24 @@ class WebsterCalendarApp(QMainWindow):
 
         self.disable_patient_controls()
         self.viewing_ceased = False
-
+        self.active_user_id = None
 
     def setup_table(self):
         headers = ["", "#", "$", "Name", "Date Packed", "Picked Up", "Due Date", "Days Till Due", "Notes"]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
-        fixed_widths = [30, 30, 30, 300, 150, 150, 150, 150]
+        fixed_widths = [28, 30, 30, 300, 150, 150, 150, 150]
+
         for i, width in enumerate(fixed_widths):
             self.table.setColumnWidth(i, width)
             self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.Fixed)
 
+        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.setIconSize(QSize(20, 20))
+
         self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
+
         font = self.table.horizontalHeader().font()
         font.setBold(True)
         self.table.horizontalHeader().setFont(font)
@@ -5915,13 +7479,25 @@ class WebsterCalendarApp(QMainWindow):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
 
+        # Do NOT use the animated GIF delegate for column 0 anymore
+        # self.table.setItemDelegateForColumn(0, AnimatedGifIconDelegate(self.table, icon_size=24))
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+
+        try:
+            self.table.customContextMenuRequested.disconnect()
+        except TypeError:
+            pass
+
+        self.table.customContextMenuRequested.connect(self.open_calendar_row_context_menu)
+
+
     def load_data(self, ceased=False):
         try:
             self.table.setSortingEnabled(False)
             self.table.setRowCount(0)
 
             self.cur.execute(
-                "SELECT id, number, charge, name, date_packed, picked_up, due_date, days_till_due, notes, paused, flagged, packed_by, checked_by "
+                "SELECT id, number, charge, name, date_packed, picked_up, due_date, days_till_due, notes, paused, flagged, packed_by, checked_by, needs_entry "
                 "FROM patients WHERE ceased = ? ORDER BY days_till_due ASC", (1 if ceased else 0,)
             )
             rows = self.cur.fetchall()
@@ -5953,20 +7529,28 @@ class WebsterCalendarApp(QMainWindow):
             def sort_key_override(r):
                 packed_by = str(r[11] or '').strip()
                 checked_by = str(r[12] or '').strip()
+                needs_entry = int(r[13] or 0)
+
+                if needs_entry:
+                    return (-2, -1)
+
                 has_unchecked_icon = bool(packed_by) and not checked_by
                 if has_unchecked_icon:
-                    return (-1, -1)  # highest priority
+                    return (-1, -1)
+
                 if r[9]:  # paused
                     return (99999, float('-inf'))
+
                 if r[10]:  # flagged
                     return (99998, float('-inf'))
+
                 try:
                     packed_ts = -datetime.strptime(r[4], "%d/%m/%Y").timestamp() if r[4] else float('-inf')
                 except Exception:
                     packed_ts = float('-inf')
+
                 day_key = r[7] if isinstance(r[7], int) else 9999
                 return (day_key, packed_ts)
-
             rows.sort(key=sort_key_override)
             self.table.setRowCount(len(rows))
 
@@ -5978,18 +7562,27 @@ class WebsterCalendarApp(QMainWindow):
             next_week_end = start_of_week + timedelta(days=13)
 
             for row_idx, row in enumerate(rows):
-                pid, number, charge, name, date_packed, picked_up, due_date, _, notes, paused, flagged, packed_by, checked_by = row
-
+                pid, number, charge, name, date_packed, picked_up, due_date, _, notes, paused, flagged, packed_by, checked_by, needs_entry = row
                 # Initialise display vars
                 warning_icon = ""
                 due_date_str = ""
                 days_text = ""
+                warning_tooltip = ""
 
                 # Unchecked indicator
                 packed_str = (packed_by or "").strip()
                 checked_str = (checked_by or "").strip()
-                if packed_str and not checked_str:
-                    warning_icon = "🔲"
+                needs_entry = int(needs_entry or 0)
+
+                if needs_entry:
+                    warning_icon = resource_path(os.path.join("icons", "needs_entering.gif"))
+                    warning_tooltip = "Needs pack entry"
+                elif packed_str and not checked_str:
+                    warning_icon = resource_path(os.path.join("icons", "needs_checking.gif"))
+                    warning_tooltip = "Packed but not checked"
+                else:
+                    warning_icon = None
+                    warning_tooltip = ""
 
                 # --- Row colour logic ---
                 row_color = QColor(255, 255, 255)  # default white
@@ -6013,7 +7606,9 @@ class WebsterCalendarApp(QMainWindow):
                         try:
                             dp = datetime.strptime(date_packed.strip(), "%d/%m/%Y")
                             if (datetime.today() - dp).days > 30:
-                                warning_icon = "⚠️"
+                                if not warning_icon:
+                                    warning_icon = resource_path(os.path.join("icons", "warning_icon.gif"))
+                                    warning_tooltip = "Pack not collected"
                         except Exception:
                             pass
                 except Exception as e:
@@ -6031,7 +7626,9 @@ class WebsterCalendarApp(QMainWindow):
                         days_text = str(delta_days)
                         try:
                             if int(delta_days) < 0:
-                                warning_icon = "⚠️"
+                                if not warning_icon:
+                                    warning_icon = resource_path(os.path.join("icons", "warning_icon.gif"))
+                                    warning_tooltip = "Pack overdue"
                         except Exception:
                             pass
                     elif date_packed and not picked_up:
@@ -6051,26 +7648,81 @@ class WebsterCalendarApp(QMainWindow):
 
                 # --- Populate table cells ---
                 values = [warning_icon, number, charge, name, date_packed, picked_up, due_date_str, days_text, notes]
+
                 for col_idx, value in enumerate(values):
-                    if col_idx == 1:
+
+                    # Column 0 = warning/status animated SVG
+                    # Column 0 = warning/status animated GIF
+                    if col_idx == 0:
+                        self.table.setItem(row_idx, col_idx, QTableWidgetItem(""))
+
+                        if value and isinstance(value, str) and os.path.exists(value):
+                            icon_label = QLabel()
+                            icon_label.setAlignment(Qt.AlignCenter)
+                            icon_label.setStyleSheet("background: transparent; padding: 0px; margin: 0px;")
+                            if warning_tooltip:
+                                icon_label.setToolTip(warning_tooltip)
+
+                            movie = QMovie(value)
+                            movie.setScaledSize(QSize(20, 20))
+                            icon_label.setMovie(movie)
+
+                            # Keep reference so GIF does not get garbage collected
+                            icon_label._movie = movie
+                            icon_label._icon_path = value
+                            icon_label._patient_number = number
+
+                            icon_name = os.path.basename(value).lower()
+
+                            if icon_name == "needs_checking.gif":
+                                icon_label.setCursor(Qt.PointingHandCursor)
+                                icon_label.mousePressEvent = lambda event, n=number: self.handle_checked_action(
+                                    preselect_number=n)
+
+                            elif icon_name == "needs_entering.gif":
+                                icon_label.setCursor(Qt.PointingHandCursor)
+                                icon_label.mousePressEvent = lambda event, n=number: self.handle_new_packed_action(
+                                    patient_number=n)
+
+                            elif icon_name == "warning_icon.gif" and warning_tooltip in ("Pack overdue",
+                                                                                         "Pack not collected"):
+                                icon_label.setCursor(Qt.PointingHandCursor)
+                                icon_label.mousePressEvent = lambda event, patient=name, reason=warning_tooltip: (
+                                    self.show_daacal_notification(
+                                        reason,
+                                        f"{str(patient).title()}"
+                                    )
+                                )
+
+                            movie.start()
+
+                            self.table.setCellWidget(row_idx, col_idx, icon_label)
+                        else:
+                            self.table.setCellWidget(row_idx, col_idx, None)
+
+                        continue
+
+                    elif col_idx == 1:
                         item = NumericItem("" if not value else str(value))
+
                     elif col_idx == 3:
-                        # ✅ Patient Name → display exactly as stored ("Last, First")
                         raw_name = str(value or "")
                         item = QTableWidgetItem(raw_name.title())
 
                     elif col_idx == 2:
                         item = QTableWidgetItem("" if not value else str(value))
+
                     elif col_idx == 7:
                         item = NumericItem("" if not value else str(value))
+
                     elif col_idx == 4:
                         item = DateItem("" if not value else str(value))
+
                     else:
                         item = QTableWidgetItem("" if not value else str(value))
 
-                    # ✅ Left-align the Notes column; center everything else
-                    # ✅ Left-align the Notes column with a small tab space
-                    if col_idx == 8:  # Notes column
+                    # Notes column
+                    if col_idx == 8:
                         note_text = f"   {value}" if value else ""
                         item.setText(note_text)
                         item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -6084,16 +7736,19 @@ class WebsterCalendarApp(QMainWindow):
                     if col_idx == 2:
                         if str(value).strip().upper() == 'Y':
                             item.setText('$')
-                            item.setForeground(QBrush(QColor(255, 255, 255)) if paused else QBrush(QColor(255, 0, 0)))
+                            item.setForeground(
+                                QBrush(QColor(255, 255, 255)) if paused else QBrush(QColor(255, 0, 0))
+                            )
                         else:
                             item.setText('')
 
                     self.table.setItem(row_idx, col_idx, item)
 
+
         except Exception as e:
             with open("error_log.txt", "a") as log:
                 log.write(f"Error in load_data: {e}\n")
-            QMessageBox.warning(self, "Load Error", f"Failed to load data:\n{e}")
+            self.show_daacal_notification( "Load Error", f"Failed to load data:\n{e}")
 
         self.table.setSortingEnabled(True)
 
@@ -6107,7 +7762,9 @@ class WebsterCalendarApp(QMainWindow):
             return
         number = number_item.text()
         number = number_item.text()
-        self.cur.execute("SELECT id, name, notes, date_packed, picked_up, due_date, given_out_by FROM patients WHERE number = ?", (number,))
+        self.cur.execute(
+            "SELECT id, name, notes, date_packed, picked_up, due_date, given_out_by FROM patients WHERE number = ?",
+            (number,))
         row_data = self.cur.fetchone()
         if row_data:
             patient_id = row_data[0]
@@ -6132,7 +7789,9 @@ class WebsterCalendarApp(QMainWindow):
             return
         number = number_item.text()
         number = number_item.text()
-        self.cur.execute("SELECT id, name, notes, date_packed, picked_up, due_date, given_out_by FROM patients WHERE number = ?", (number,))
+        self.cur.execute(
+            "SELECT id, name, notes, date_packed, picked_up, due_date, given_out_by FROM patients WHERE number = ?",
+            (number,))
         row_data = self.cur.fetchone()
         if row_data:
             patient_id = row_data[0]
@@ -6146,7 +7805,6 @@ class WebsterCalendarApp(QMainWindow):
         self.load_data()
         self.update_button_states()
         self.table.selectRow(selected)
-
 
     def load_ceased_data(self):
         showing_ceased = self.view_ceased_action.isChecked()
@@ -6405,7 +8063,8 @@ class WebsterCalendarApp(QMainWindow):
                             if val is None or str(val).strip() == '':
                                 break
                             if isinstance(val, (int, float)):
-                                cell_date = datetime.fromordinal(datetime(1900, 1, 1).toordinal() + int(val) - 2).strftime("%d/%m/%Y")
+                                cell_date = datetime.fromordinal(
+                                    datetime(1900, 1, 1).toordinal() + int(val) - 2).strftime("%d/%m/%Y")
                             elif isinstance(val, datetime):
                                 cell_date = val.strftime("%d/%m/%Y")
                             elif isinstance(val, str):
@@ -6459,6 +8118,7 @@ class WebsterCalendarApp(QMainWindow):
         # --- Add Edit Drug List button below Patient Information ---
         edit_drugs_btn = QPushButton("Edit Active Drugs")
         edit_drugs_btn.setStyleSheet("font-weight: bold;")
+
         def handle_edit_drugs():
             xl_path = os.path.join(COLLECTION_LOGS_DIR, f"{name_to_open.upper().replace(',', '').strip()}.xlsx")
             self.excel_path = xl_path
@@ -6479,6 +8139,7 @@ class WebsterCalendarApp(QMainWindow):
                     print("DEBUG: Failed to load med names:", e)
             self.blank_pack_window = self  # placeholder parent
             self.open_edit_drugs_dialog()
+
         edit_drugs_btn.clicked.connect(handle_edit_drugs)
         outer_left_layout.addWidget(edit_drugs_btn)
 
@@ -6521,11 +8182,13 @@ class WebsterCalendarApp(QMainWindow):
 
                     try:
                         if isinstance(date_val, (int, float)):
-                            pack_date = datetime.fromordinal(datetime(1900, 1, 1).toordinal() + int(date_val) - 2).strftime("%d/%m/%Y")
+                            pack_date = datetime.fromordinal(
+                                datetime(1900, 1, 1).toordinal() + int(date_val) - 2).strftime("%d/%m/%Y")
                         elif isinstance(date_val, datetime):
                             pack_date = date_val.strftime("%d/%m/%Y")
                         elif isinstance(date_val, str) and date_val.strip().isdigit():
-                            pack_date = datetime.fromordinal(datetime(1900, 1, 1).toordinal() + int(date_val.strip()) - 2).strftime("%d/%m/%Y")
+                            pack_date = datetime.fromordinal(
+                                datetime(1900, 1, 1).toordinal() + int(date_val.strip()) - 2).strftime("%d/%m/%Y")
                         else:
                             pack_date = datetime.strptime(str(date_val).strip(), "%d/%m/%Y").strftime("%d/%m/%Y")
                     except:
@@ -6537,7 +8200,8 @@ class WebsterCalendarApp(QMainWindow):
                             break
                     try:
                         if isinstance(date_val, (int, float)):
-                            pack_date = datetime.fromordinal(datetime(1900, 1, 1).toordinal() + int(date_val) - 2).strftime("%d/%m/%Y")
+                            pack_date = datetime.fromordinal(
+                                datetime(1900, 1, 1).toordinal() + int(date_val) - 2).strftime("%d/%m/%Y")
                         elif isinstance(date_val, datetime):
                             pack_date = date_val.strftime("%d/%m/%Y")
                         else:
@@ -6554,7 +8218,8 @@ class WebsterCalendarApp(QMainWindow):
                     # Build table
                     table = QTableWidget()
                     table.setColumnCount(6)
-                    table.setHorizontalHeaderLabels(["Medication", "QTY Dispensed", "Batch", "Expiry", "QTY Packed", "QTY Remaining"])
+                    table.setHorizontalHeaderLabels(
+                        ["Medication", "QTY Dispensed", "Batch", "Expiry", "QTY Packed", "QTY Remaining"])
                     header = table.horizontalHeader()
                     for i in range(6):
                         header.setSectionResizeMode(i, QHeaderView.Stretch)
@@ -6594,11 +8259,13 @@ class WebsterCalendarApp(QMainWindow):
                     if date_val is not None and str(date_val).strip().lower() != "none":
                         try:
                             if isinstance(date_val, (int, float)):
-                                label = datetime.fromordinal(datetime(1900, 1, 1).toordinal() + int(date_val) - 2).strftime("%d/%m/%Y")
+                                label = datetime.fromordinal(
+                                    datetime(1900, 1, 1).toordinal() + int(date_val) - 2).strftime("%d/%m/%Y")
                             elif isinstance(date_val, datetime):
                                 label = date_val.strftime("%d/%m/%Y")
                             elif isinstance(date_val, str) and date_val.strip().isdigit():
-                                label = datetime.fromordinal(datetime(1900, 1, 1).toordinal() + int(date_val.strip()) - 2).strftime("%d/%m/%Y")
+                                label = datetime.fromordinal(
+                                    datetime(1900, 1, 1).toordinal() + int(date_val.strip()) - 2).strftime("%d/%m/%Y")
                             else:
                                 label = datetime.strptime(str(date_val).strip(), "%d/%m/%Y").strftime("%d/%m/%Y")
                         except:
@@ -6687,7 +8354,6 @@ class WebsterCalendarApp(QMainWindow):
         QTimer.singleShot(200, lambda: show_pack(self.current_pack_index))
         # --- End Injected ---
 
-
         right = QVBoxLayout()
         right.setAlignment(Qt.AlignTop)
         self.add_note_label = QLabel("Add Note:")
@@ -6700,7 +8366,7 @@ class WebsterCalendarApp(QMainWindow):
 
         self.notes_input.returnPressed.connect(lambda: self.add_note_to_log(pid))
 
-                # Load and display previous notes from log
+        # Load and display previous notes from log
         note_groupbox = QGroupBox("Patient Notes")
         note_groupbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         note_groupbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -6729,13 +8395,15 @@ class WebsterCalendarApp(QMainWindow):
         existing_notes = [row[0] for row in self.cur.fetchall()]
         if original_notes.strip() and original_notes.strip() not in existing_notes:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)", (pid, original_notes.strip(), now))
+            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)",
+                             (pid, original_notes.strip(), now))
             self.conn.commit()
         self.cur.execute("SELECT note FROM notes_log WHERE patient_id = ?", (pid,))
         existing_notes = [row[0] for row in self.cur.fetchall()]
         if original_notes.strip() and original_notes.strip() not in existing_notes:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)", (pid, original_notes.strip(), now))
+            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)",
+                             (pid, original_notes.strip(), now))
             self.conn.commit()
         self.load_note_log(pid)
         self.cur.execute("SELECT note FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC LIMIT 1", (pid,))
@@ -6746,19 +8414,22 @@ class WebsterCalendarApp(QMainWindow):
         existing_notes = [row[0] for row in self.cur.fetchall()]
         if original_notes.strip() and original_notes.strip() not in existing_notes:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)", (pid, original_notes.strip(), now))
+            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)",
+                             (pid, original_notes.strip(), now))
             self.conn.commit()
         self.cur.execute("SELECT note FROM notes_log WHERE patient_id = ?", (pid,))
         existing_notes = [row[0] for row in self.cur.fetchall()]
         if notes.strip() and notes.strip() not in existing_notes:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)", (pid, notes.strip(), now))
+            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)",
+                             (pid, notes.strip(), now))
             self.conn.commit()
         # Inject legacy notes into notes_log if missing
         self.cur.execute("SELECT COUNT(*) FROM notes_log WHERE patient_id = ?", (pid,))
         if self.cur.fetchone()[0] == 0 and notes.strip():
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)", (pid, notes.strip(), now))
+            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)",
+                             (pid, notes.strip(), now))
             self.conn.commit()
 
         scroll = QScrollArea()
@@ -6801,9 +8472,9 @@ class WebsterCalendarApp(QMainWindow):
             concession_val = (self.concession_input.text() or "").strip()
 
             # If not claiming, clear card fields
-            #if claim_val == 'N':
-             #   medicare_val = ""
-              #  concession_val = ""
+            # if claim_val == 'N':
+            #   medicare_val = ""
+            #  concession_val = ""
 
             # Notes (only the “add note” box on the right – legacy notes go via notes_log elsewhere)
             notes_current = (self.notes_input.text() or "").strip()
@@ -6826,11 +8497,11 @@ class WebsterCalendarApp(QMainWindow):
                 self.concession_input.setStyleSheet("")
 
             if invalid_fields:
-                QMessageBox.warning(
-                    self,
+                self.show_daacal_notification(
                     "Invalid Card Number",
-                    "The following field(s) are invalid:\n\n• " + "\n• ".join(invalid_fields) +
-                    "\n\nPlease correct these before saving and closing."
+                    "The following field(s) are invalid:<br><br>• " +
+                    "<br>• ".join(invalid_fields) +
+                    "<br><br>Please correct these before saving and closing."
                 )
                 if "Medicare number" in invalid_fields:
                     self.medicare_input.setFocus()
@@ -6848,7 +8519,6 @@ class WebsterCalendarApp(QMainWindow):
                                      charge=?,
                                      date_packed=?,
                                      picked_up=?,
-                                     notes=?,
                                      pack_size=?,
                                      partial_supply=?,
                                      weeks_per_blister=?,
@@ -6861,7 +8531,6 @@ class WebsterCalendarApp(QMainWindow):
                                      charge_val,
                                      packed_txt,
                                      picked_txt,
-                                     notes_current,  # keep simple notes field in sync (log is handled elsewhere)
                                      pack_size_val,
                                      claim_val,
                                      weeks_sel,
@@ -6887,7 +8556,7 @@ class WebsterCalendarApp(QMainWindow):
                     self.reload_calendar_view()
 
             except Exception as e:
-                QMessageBox.critical(self, "Save Failed", f"An error occurred while saving:\n\n{e}")
+                self.show_daacal_notification("Save Failed", f"An error occurred while saving:<br>{e}")
                 self.save_allowed = False
                 return
 
@@ -6906,13 +8575,14 @@ class WebsterCalendarApp(QMainWindow):
         close_btn = QPushButton("❌")
         close_btn.setFixedSize(24, 24)
         close_btn.setStyleSheet("QPushButton { border: none; }")
+
         def try_close_tab():
             unsaved = (
-                self.first_name_input.isModified() or
-                self.last_name_input.isModified() or
-                self.notes_input.isModified() or
-                self.packed_input.isModified() or
-                self.picked_input.isModified()
+                    self.first_name_input.isModified() or
+                    self.last_name_input.isModified() or
+                    self.notes_input.isModified() or
+                    self.packed_input.isModified() or
+                    self.picked_input.isModified()
             )
             if unsaved:
                 reply = QMessageBox.question(self, "Unsaved Changes",
@@ -6924,6 +8594,7 @@ class WebsterCalendarApp(QMainWindow):
                     save_and_close()
                     return
             self.tabs.removeTab(self.tabs.indexOf(patient_page))
+
         close_btn.clicked.connect(try_close_tab)
         tab_layout.addWidget(tab_label)
         tab_layout.addWidget(close_btn)
@@ -6968,11 +8639,13 @@ class WebsterCalendarApp(QMainWindow):
         self.tabs.setCurrentWidget(patient_page)
         right_widget_wrapper.updateGeometry()
         QTimer.singleShot(100, lambda: self.tabs.currentWidget().layout().update())
+
     def load_note_log(self, patient_id):
         for i in reversed(range(self.note_log_layout.count())):
             self.note_log_layout.itemAt(i).widget().setParent(None)
 
-        self.cur.execute("SELECT id, note, timestamp FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC", (patient_id,))
+        self.cur.execute("SELECT id, note, timestamp FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC",
+                         (patient_id,))
         for note_id, note_text, ts in self.cur.fetchall():
             note_line = QHBoxLayout()
             note_label = QTextEdit()
@@ -6989,10 +8662,12 @@ class WebsterCalendarApp(QMainWindow):
 
             def make_set_main_note(text, pid):
                 def set_note():
+                    # Pin this note as the calendar/main note only.
+                    # Do NOT copy it into the add-note box, or Save + Close will log it again.
                     self.cur.execute("UPDATE patients SET notes = ? WHERE id = ?", (text, pid))
-                    self.notes_input.setText(text)
                     self.conn.commit()
                     self.load_data()
+
                 return set_note
 
             star_btn.clicked.connect(make_set_main_note(note_text, patient_id))
@@ -7002,12 +8677,9 @@ class WebsterCalendarApp(QMainWindow):
                 def delete_note():
                     self.cur.execute("DELETE FROM notes_log WHERE id = ?", (nid,))
                     self.conn.commit()
-                    self.cur.execute("SELECT note FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC LIMIT 1", (patient_id,))
-                    latest_note = self.cur.fetchone()
-                    self.cur.execute("UPDATE patients SET notes = ? WHERE id = ?", ((latest_note[0] if latest_note else ""), patient_id))
-                    self.conn.commit()
                     self.load_note_log(patient_id)
                     self.load_data()
+
                 return delete_note
 
             delete_btn.clicked.connect(make_delete_note(note_id))
@@ -7028,14 +8700,16 @@ class WebsterCalendarApp(QMainWindow):
             print(f"SKIP: Tried to update '{field}' before patient page loaded.")
             return
         try:
-            self.cur.execute(f"UPDATE patients SET {field} = ? WHERE number = ?", (value, int(self.current_patient_number)))
+            self.cur.execute(f"UPDATE patients SET {field} = ? WHERE number = ?",
+                             (value, int(self.current_patient_number)))
             self.conn.commit()
         except Exception as e:
             print(f"ERROR: Failed to update {field}: {e}")
         for i in reversed(range(self.note_log_layout.count())):
             self.note_log_layout.itemAt(i).widget().setParent(None)
 
-        self.cur.execute("SELECT id, note, timestamp FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC", (patient_id,))
+        self.cur.execute("SELECT id, note, timestamp FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC",
+                         (patient_id,))
         for note_id, note_text, ts in self.cur.fetchall():
             note_line = QHBoxLayout()
             note_label = QTextEdit()
@@ -7049,13 +8723,16 @@ class WebsterCalendarApp(QMainWindow):
             delete_btn = QPushButton("❌")
             star_btn = QPushButton("⭐")
             star_btn.setFixedWidth(30)
+
             def make_set_main_note(text, pid):
                 def set_note():
                     self.cur.execute("UPDATE patients SET notes = ? WHERE id = ?", (text, pid))
                     self.notes_input.setText(text)
                     self.conn.commit()
                     self.load_data()
+
                 return set_note
+
             star_btn.clicked.connect(make_set_main_note(note_text, patient_id))
             delete_btn.setFixedWidth(30)
 
@@ -7063,12 +8740,15 @@ class WebsterCalendarApp(QMainWindow):
                 def delete_note():
                     self.cur.execute("DELETE FROM notes_log WHERE id = ?", (nid,))
                     self.conn.commit()
-                    self.cur.execute("SELECT note FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC LIMIT 1", (patient_id,))
+                    self.cur.execute("SELECT note FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC LIMIT 1",
+                                     (patient_id,))
                     latest_note = self.cur.fetchone()
-                    self.cur.execute("UPDATE patients SET notes = ? WHERE id = ?", ((latest_note[0] if latest_note else ""), patient_id))
+                    self.cur.execute("UPDATE patients SET notes = ? WHERE id = ?",
+                                     ((latest_note[0] if latest_note else ""), patient_id))
                     self.conn.commit()
                     self.load_note_log(patient_id)
                     self.load_data()
+
                 return delete_note
 
             delete_btn.clicked.connect(make_delete_note(note_id))
@@ -7080,11 +8760,10 @@ class WebsterCalendarApp(QMainWindow):
             wrapper.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             self.note_log_layout.addWidget(wrapper)
 
-
     def handle_warning_click(self, row, col):
         if not self.enforce_login(): return
         item = self.table.item(row, col)
-        if item and col == 0 and item.text().strip() == "⚠️":
+        if col == 0 and self.table.cellWidget(row, col) is not None:
             name_item = self.table.item(row, 3)
             if name_item:
                 due_val = self.table.item(row, 7).text()
@@ -7102,6 +8781,7 @@ class WebsterCalendarApp(QMainWindow):
         self.warning_popup.setLayout(layout)
         self.warning_popup.setFixedSize(450, 120)
         self.warning_popup.show()
+
     def update_button_states(self):
         selected = self.table.currentRow()
         if selected < 0:
@@ -7130,6 +8810,7 @@ class WebsterCalendarApp(QMainWindow):
                 else:
                     self.flag_button.setText("Changes")
                     self.flag_button.setStyleSheet("")
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.table.clearSelection()
@@ -7142,26 +8823,17 @@ class WebsterCalendarApp(QMainWindow):
             self.table.selectRow(row)
         self.update_button_states()
 
-
-
     def add_note_to_log(self, patient_id):
         new_note = self.notes_input.text().strip()
         if new_note:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)", (patient_id, new_note, now))
+            self.cur.execute("INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)",
+                             (patient_id, new_note, now))
             self.conn.commit()
-
-            # Get latest note and update patients.notes
-            self.cur.execute("SELECT note FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC LIMIT 1", (patient_id,))
-            latest_note = self.cur.fetchone()
-            if latest_note:
-                self.cur.execute("UPDATE patients SET notes = ? WHERE id = ?", (latest_note[0], patient_id))
-                self.conn.commit()
 
             self.notes_input.setText("")
             self.load_note_log(patient_id)
             self.load_data()
-
 
         self.users_window = QWidget()
         self.users_window.setWindowTitle("Manage Users")
@@ -7180,7 +8852,6 @@ class WebsterCalendarApp(QMainWindow):
         user_table.horizontalHeader().setStretchLastSection(True)
         user_table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(user_table)
-
 
     def open_patients_page(self):
         print("DEBUG: Opening Patient Manager")
@@ -7249,6 +8920,7 @@ class WebsterCalendarApp(QMainWindow):
             self.user_table.insertRow(row)
             self.user_table.setItem(row, 0, QTableWidgetItem(row_data[0]))
             self.user_table.setItem(row, 1, QTableWidgetItem(row_data[1]))
+
         def add_user():
             name, ok1 = QInputDialog.getText(self, "Enter User Name", "User Name:")
             if not ok1 or not name.strip(): return
@@ -7256,7 +8928,7 @@ class WebsterCalendarApp(QMainWindow):
             if not ok2 or not user_id.strip(): return
             self.cur.execute("SELECT COUNT(*) FROM users WHERE user_id = ?", (user_id.strip(),))
             if self.cur.fetchone()[0] > 0:
-                QMessageBox.warning(self.users_window, "Duplicate User ID", "A user with this ID already exists.")
+                self.show_daacal_notification("Duplicate User ID", "A user with this ID already exists.")
                 return
             row = self.user_table.rowCount()
             self.user_table.insertRow(row)
@@ -7264,18 +8936,21 @@ class WebsterCalendarApp(QMainWindow):
             self.user_table.setItem(row, 1, QTableWidgetItem(user_id.strip()))
             self.cur.execute("INSERT INTO users (name, user_id) VALUES (?, ?)", (name.strip(), user_id.strip()))
             self.conn.commit()
+
         def remove_user():
             selected = self.user_table.currentRow()
             if selected < 0:
-                QMessageBox.warning(self.users_window, "No Selection", "Please select a user to remove.")
+                self.show_daacal_notification("No Selection", "Please select a user to remove.")
                 return
-            confirm = QMessageBox.question(self.users_window, "Confirm Removal", "Remove selected user?", QMessageBox.Yes | QMessageBox.Cancel)
+            confirm = QMessageBox.question(self.users_window, "Confirm Removal", "Remove selected user?",
+                                           QMessageBox.Yes | QMessageBox.Cancel)
             user_id_item = self.user_table.item(selected, 1)
             if user_id_item:
                 self.cur.execute("DELETE FROM users WHERE user_id = ?", (user_id_item.text().strip(),))
                 self.conn.commit()
             if confirm == QMessageBox.Yes:
                 self.user_table.removeRow(selected)
+
         add_user_btn.clicked.connect(add_user)
         remove_user_btn.clicked.connect(remove_user)
         self.users_window.setLayout(layout)
@@ -7313,7 +8988,7 @@ class WebsterCalendarApp(QMainWindow):
             self.conn.commit()
             print(f"DEBUG: Permanently deleted patient #{number} ({name})")
         except Exception as e:
-            QMessageBox.critical(self, "Delete Error", f"Failed to delete patient:\n{e}")
+            self.show_daacal_notification("Delete Error", f"Failed to delete patient:<br>{e}")
             return
 
         self.load_data(ceased=True)
@@ -7347,10 +9022,11 @@ class WebsterCalendarApp(QMainWindow):
             self.login_input.setReadOnly(True)
         if not entered_id:
             return
-        self.cur.execute("SELECT name FROM users WHERE LOWER(user_id) = ?", (entered_id,))
+        self.cur.execute("SELECT user_id, name FROM users WHERE LOWER(user_id) = ?", (entered_id,))
         result = self.cur.fetchone()
         if result:
-            self.active_user = result[0]
+            self.active_user_id = result[0].strip().upper()
+            self.active_user = result[1]
             self.login_input.setText(self.active_user)
             if hasattr(self, 'patient_login_input'):
                 self.patient_login_input.setText(self.active_user)
@@ -7364,8 +9040,6 @@ class WebsterCalendarApp(QMainWindow):
                 self.patient_login_input.setReadOnly(False)
             self.login_input.setReadOnly(False)
 
-
-    
     def enforce_login(self):
         if self.active_user:
             return True
@@ -7374,9 +9048,11 @@ class WebsterCalendarApp(QMainWindow):
         dialog.setModal(True)
         dialog.setFixedSize(480, 500)
         dialog.setStyleSheet("background-color: rgb(228, 224, 219);")
+
         layout = QVBoxLayout()
 
-        icon_path = os.path.join(BASE_DIR, "DAACal.png")
+        # --- Logo ---
+        icon_path = resource_path(os.path.join("DAACal.png"))
         if os.path.exists(icon_path):
             icon_label = QLabel()
             pixmap = QPixmap(icon_path)
@@ -7384,81 +9060,45 @@ class WebsterCalendarApp(QMainWindow):
             icon_label.setAlignment(Qt.AlignCenter)
             layout.addWidget(icon_label)
 
+        # --- Login field ---
         login_field = QLineEdit()
         login_field.setPlaceholderText("User ID")
         login_field.setStyleSheet("background-color: white;")
         layout.addWidget(login_field)
 
+        # --- Login logic ---
         def try_login():
             user_id = login_field.text().strip().lower()
-            self.cur.execute("SELECT name FROM users WHERE LOWER(user_id) = ?", (user_id,))
+            self.cur.execute(
+                "SELECT user_id, name FROM users WHERE LOWER(user_id) = ?",
+                (user_id,)
+            )
             result = self.cur.fetchone()
+
             if result:
-                self.active_user = result[0]
+                self.active_user_id = result[0].strip().upper()
+                self.active_user = result[1]
                 self.login_input.setText(self.active_user)
                 self.login_input.setReadOnly(True)
+
                 if hasattr(self, "patient_login_input"):
                     self.patient_login_input.setText(self.active_user)
                     self.patient_login_input.setReadOnly(True)
+
                 dialog.accept()
             else:
                 login_field.clear()
 
         login_field.returnPressed.connect(try_login)
+
         layout.setAlignment(Qt.AlignCenter)
         dialog.setLayout(layout)
         dialog.exec_()
 
         return bool(self.active_user)
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("User Login")
-        dialog.setModal(True)
-        layout = QVBoxLayout()
-
-        icon_path = os.path.join(BASE_DIR, "DAACal.png")
-        if os.path.exists(icon_path):
-            icon_label = QLabel()
-            pixmap = QPixmap(icon_path)
-            icon_label.setPixmap(pixmap.scaledToHeight(400, Qt.SmoothTransformation))
-            icon_label.setAlignment(Qt.AlignCenter)
-            layout.addWidget(icon_label)
-
-        login_field = QLineEdit()
-        login_field.setPlaceholderText("User ID")
-        login_field.setStyleSheet("background-color: white;")
-        layout.addWidget(login_field)
-
-        button = QPushButton("Log In")
-        layout.addWidget(button)
-
-        def try_login():
-            user_id = login_field.text().strip().lower()
-            self.cur.execute("SELECT name FROM users WHERE LOWER(user_id) = ?", (user_id,))
-            result = self.cur.fetchone()
-            if result:
-                self.active_user = result[0]
-                self.login_input.setText(self.active_user)
-                self.login_input.setReadOnly(True)
-                if hasattr(self, "patient_login_input"):
-                    self.patient_login_input.setText(self.active_user)
-                    self.patient_login_input.setReadOnly(True)
-                dialog.accept()
-            else:
-                login_field.clear()
-
-        login_field.returnPressed.connect(try_login)
-        button.clicked.connect(try_login)
-
-        dialog.setLayout(layout)
-        dialog.exec_()
-
-        return bool(self.active_user)
-
-
     def is_authorized(self):
         if not self.active_user:
-            QMessageBox.warning(self, "Access Denied", "You must log in as an active user to perform this action.")
+            self.show_daacal_notification( "Access Denied", "You must log in as an active user to perform this action.")
             return False
         return True
 
@@ -7472,9 +9112,6 @@ class WebsterCalendarApp(QMainWindow):
                 self.disable_patient_controls()
             return
 
-
-
-
     def login_click_select_all(self, event):
         if self.login_input.isReadOnly():
             self.login_input.setReadOnly(False)
@@ -7482,8 +9119,6 @@ class WebsterCalendarApp(QMainWindow):
         self.login_input.selectAll()
         QLineEdit.mousePressEvent(self.login_input, event)
         QLineEdit.mousePressEvent(self.login_input, event)
-
-
 
     def eventFilter(self, obj, event):
         # Handle backspace logout for both login fields
@@ -7518,12 +9153,12 @@ class WebsterCalendarApp(QMainWindow):
         print("DEBUG: Using REDEFINED edit_current_pack_entry")
         patient_name = getattr(self, 'current_patient_name', '').strip()
         if not patient_name:
-            QMessageBox.warning(self, 'Missing Data', 'No current patient selected.')
+            self.show_daacal_notification( 'Missing Data', 'No current patient selected.')
             return
         xl_path = os.path.join(COLLECTION_LOGS_DIR, f"{patient_name.upper().replace(',', '').strip()}.xlsx")
         print(f'DEBUG: Trying to open Excel path: {xl_path}')
         if not os.path.exists(xl_path):
-            QMessageBox.warning(self, 'Missing File', f'Could not find Excel file for {patient_name}.')
+            self.show_daacal_notification( 'Missing File', f'Could not find Excel file for {patient_name}.')
             return
         wb = openpyxl.load_workbook(xl_path)
         ws = wb.active
@@ -7554,7 +9189,7 @@ class WebsterCalendarApp(QMainWindow):
             except:
                 continue
         if not found_col:
-            QMessageBox.warning(self, 'Entry Not Found', f'Could not find matching pack date: {pack_date}')
+            self.show_daacal_notification( 'Entry Not Found', f'Could not find matching pack date: {pack_date}')
             return
         self.blank_window = QWidget()
         self.blank_window.installEventFilter(self.global_event_filter)
@@ -7566,7 +9201,7 @@ class WebsterCalendarApp(QMainWindow):
         table.setColumnCount(4)
         table.setEditTriggers(QTableWidget.AllEditTriggers)
         table.setSelectionMode(QTableWidget.NoSelection)
-        
+
         table.setHorizontalHeaderLabels(["Medication", "Batch/Expiry", "Qty Dispensed", "Qty Packed"])
         table.setEditTriggers(QTableWidget.AllEditTriggers)
         table.setSelectionMode(QTableWidget.NoSelection)
@@ -7579,34 +9214,40 @@ class WebsterCalendarApp(QMainWindow):
             if drug:
                 table.insertRow(i)
                 table.setItem(i, 0, QTableWidgetItem(str(drug)))
-                be = ws.cell(row=i+4, column=found_col + 2).value
-                disp = ws.cell(row=i+4, column=found_col + 1).value
-                pack = ws.cell(row=i+4, column=found_col + 3).value
+                be = ws.cell(row=i + 4, column=found_col + 2).value
+                disp = ws.cell(row=i + 4, column=found_col + 1).value
+                pack = ws.cell(row=i + 4, column=found_col + 3).value
                 table.setItem(i, 1, QTableWidgetItem(str(be) if be else ""))
                 table.setItem(i, 2, QTableWidgetItem(str(disp) if disp else ""))
                 table.setItem(i, 3, QTableWidgetItem(str(pack) if pack else ""))
         layout.addWidget(table)
         table.setStyleSheet("QTableWidget::item:selected { background-color: rgb(240, 240, 240); }")
+
         def highlight_row(row):
             for col in range(table.columnCount()):
                 item = table.item(row, col)
                 if item:
                     item.setBackground(QColor(240, 240, 240))
+
         def on_selection_or_edit():
             row = table.currentRow()
             if row >= 0:
                 highlight_row(row)
+
         table.itemSelectionChanged.connect(on_selection_or_edit)
         table.itemChanged.connect(on_selection_or_edit)
 
         table.setStyleSheet("QTableWidget::item:selected { background-color: rgb(240, 240, 240); }")
+
         def highlight_row(row):
             for col in range(table.columnCount()):
                 item = table.item(row, col)
                 if item:
                     item.setBackground(QColor(240, 240, 240))
+
         def handle_cell_click(row, col):
             highlight_row(row)
+
         table.cellClicked.connect(handle_cell_click)
 
         def save_edits():
@@ -7637,6 +9278,7 @@ class WebsterCalendarApp(QMainWindow):
                 if row_index is not None:
                     self.tabs.removeTab(self.tabs.currentIndex())
                     QTimer.singleShot(100, lambda: self.open_patient_tab(row_index, 0))
+
         btn_row = QHBoxLayout()
         save_btn = QPushButton("Save Edits")
         save_btn.clicked.connect(save_edits)
@@ -7645,6 +9287,7 @@ class WebsterCalendarApp(QMainWindow):
         layout.addLayout(btn_row)
         self.blank_window.setLayout(layout)
         self.blank_window.show()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, "tabs") and self.tabs.currentWidget():
@@ -7653,7 +9296,8 @@ class WebsterCalendarApp(QMainWindow):
                 child.updateGeometry()
 
     def disable_patient_controls(self):
-        for attr in ['first_name_input', 'last_name_input', 'charge_input', 'packed_input', 'picked_input', 'notes_input']:
+        for attr in ['first_name_input', 'last_name_input', 'charge_input', 'packed_input', 'picked_input',
+                     'notes_input']:
             if hasattr(self, attr):
                 getattr(self, attr).setDisabled(True)
         for dropdown in ['pack_size_dropdown', 'weeks_per_blister_dropdown']:
@@ -7663,7 +9307,8 @@ class WebsterCalendarApp(QMainWindow):
             self.claim_button.setDisabled(True)
 
     def enable_patient_controls(self):
-        for attr in ['first_name_input', 'last_name_input', 'charge_input', 'packed_input', 'picked_input', 'notes_input']:
+        for attr in ['first_name_input', 'last_name_input', 'charge_input', 'packed_input', 'picked_input',
+                     'notes_input']:
             if hasattr(self, attr):
                 getattr(self, attr).setDisabled(False)
         for dropdown in ['pack_size_dropdown', 'weeks_per_blister_dropdown']:
@@ -7688,6 +9333,7 @@ class WebsterCalendarApp(QMainWindow):
         button_layout.addWidget(print_btn)
         layout.addWidget(browser)
         layout.addLayout(button_layout)
+
         def proceed_to_print():
             printer = QPrinter()
             printer.setOrientation(QPrinter.Landscape)
@@ -7698,6 +9344,7 @@ class WebsterCalendarApp(QMainWindow):
                 doc.setHtml(html)
                 doc.print_(printer)
             preview_dialog.accept()
+
         print_btn.clicked.connect(proceed_to_print)
         cancel_btn.clicked.connect(preview_dialog.reject)
         preview_dialog.exec_()
@@ -7747,7 +9394,7 @@ class WebsterCalendarApp(QMainWindow):
             table.setItem(row_idx, 2, QTableWidgetItem(""))
             table.setItem(row_idx, 3, QTableWidgetItem(str(last_pack)))
 
-    def handle_checked_action(self):
+    def handle_checked_action(self, preselect_number=None):
         print("DEBUG: Checked button clicked")
 
         if not self.enforce_login():
@@ -7767,10 +9414,11 @@ class WebsterCalendarApp(QMainWindow):
         print(f"DEBUG: Rows returned from DB: {len(rows)}")
         if not rows:
             print("DEBUG: No patients match query → showing info popup")
-            QMessageBox.information(self, "No Unchecked Packs", "There are no packs pending checking.")
+            self.show_daacal_notification(
+                "No Unchecked Packs",
+                "There are no packs pending checking."
+            )
             return
-
-
 
         # Create as a standalone top-level dialog window
         self.check_window = QWidget(None, Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
@@ -7817,6 +9465,10 @@ class WebsterCalendarApp(QMainWindow):
         for number, name, packed_by, checked_by in rows:
             cb = QCheckBox(f"{name} (Packed by: {packed_by})")
             cb.patient_number = number
+
+            if preselect_number is not None and str(number) == str(preselect_number):
+                cb.setChecked(True)
+
             layout.addWidget(cb)
             self.checkboxes_to_check.append(cb)
 
@@ -7836,7 +9488,7 @@ class WebsterCalendarApp(QMainWindow):
         def apply_checking():
             checker_id = self.checker_input.text().strip()
             if not checker_id:
-                QMessageBox.warning(self.check_window, "Input Required", "Checker ID is required.")
+                self.show_daacal_notification("Input Required", "Checker ID is required.")
                 return
 
             for cb in self.checkboxes_to_check:
@@ -8019,8 +9671,20 @@ class WebsterCalendarApp(QMainWindow):
 
     def handle_new_packed_action(self, patient_number=None, prefill_date=None):
         selected_row = self.table.currentRow()
+
+        if patient_number is not None:
+            selected_row = -1
+            target_number = str(patient_number).strip()
+
+            for r in range(self.table.rowCount()):
+                number_item = self.table.item(r, 1)
+                if number_item and number_item.text().strip() == target_number:
+                    selected_row = r
+                    self.table.setCurrentCell(r, 1)
+                    self.table.selectRow(r)
+                    break
+
         if selected_row < 0:
-            # absolutely nothing happens if no row is selected
             self.current_patient_id = None
             self.current_patient_number = None
             return
@@ -8032,7 +9696,17 @@ class WebsterCalendarApp(QMainWindow):
         date_packed = date_packed_item.text().strip() if date_packed_item else ""
         collected = collected_item.text().strip() if collected_item else ""
 
-        if date_packed and not collected:
+        needs_entry = 0
+
+        number_item = self.table.item(selected_row, 1)
+        if number_item:
+            number = number_item.text().strip()
+            self.cur.execute("SELECT needs_entry FROM patients WHERE number = ?", (number,))
+            result = self.cur.fetchone()
+            if result:
+                needs_entry = int(result[0] or 0)
+
+        if date_packed and not collected and not needs_entry:
             reply = QMessageBox.question(
                 self,
                 "Uncollected Pack",
@@ -8071,11 +9745,7 @@ class WebsterCalendarApp(QMainWindow):
         result = self.cur.fetchone()
 
         if not result:
-            QMessageBox.warning(
-                self,
-                "Not Found",
-                f"Could not find patient #{number} in database."
-            )
+            self.show_daacal_notification("Not Found", f"Could not find patient #{number} in database.")
             return
 
         patient_id = result[0]
@@ -8090,10 +9760,9 @@ class WebsterCalendarApp(QMainWindow):
         print(f"DEBUG: Trying to open Excel path: {xl_path}")
 
         if not os.path.exists(xl_path):
-            QMessageBox.warning(
-                self,
+            self.show_daacal_notification(
                 "Missing Collection Log",
-                f"Collection log not found.\nExpected file:\n\n{excel_filename}"
+                f"Collection log not found.<br>Expected file:<br><br>{excel_filename}"
             )
             return
 
@@ -8118,8 +9787,6 @@ class WebsterCalendarApp(QMainWindow):
         self.current_patient_id = patient_id
         self.current_med_names = med_names
         self.pack_entry_ws = ws
-
-
 
         self.blank_pack_window = QWidget()
         self.blank_pack_window.setAttribute(Qt.WA_DeleteOnClose, True)
@@ -8250,21 +9917,30 @@ class WebsterCalendarApp(QMainWindow):
 
         def finish_pack_entry():
 
-
             pack_date = self.pack_date_input.text().strip()
             packer_id = self.packer_input.text().strip()
 
             if not pack_date or not packer_id:
-                QMessageBox.warning(self.blank_pack_window, "Missing Info", "Pack date and packer must be filled.")
+                self.show_daacal_notification("Missing Info", "Pack date and packer must be filled.")
                 return
 
             # Convert full name to initials if full name entered
             if " " in packer_id and "/" not in packer_id:
                 packer_id = "".join([p[0].upper() for p in packer_id.split()])
 
-            # Append '/' to leave unchecked
-            if not packer_id.endswith("/"):
-                packer_id = f"{packer_id}/"
+            self.cur.execute(
+                "SELECT checked_by, needs_entry FROM patients WHERE id = ?",
+                (self.current_patient_id,)
+            )
+            pending_row = self.cur.fetchone()
+            prechecked_by = ""
+            if pending_row and int(pending_row[1] or 0) == 1:
+                prechecked_by = (pending_row[0] or "").strip()
+
+            if prechecked_by:
+                packed_by_value = f"{packer_id}/{prechecked_by}"
+            else:
+                packed_by_value = packer_id if packer_id.endswith("/") else f"{packer_id}/"
 
             # Load workbook
             wb = openpyxl.load_workbook(self.excel_path)
@@ -8302,7 +9978,7 @@ class WebsterCalendarApp(QMainWindow):
                         column=next_block_start + 2).value = batch_expiry.text().strip() if batch_expiry else ""
                 ws.cell(row=drug_row,
                         column=next_block_start + 3).value = qty_packed.text().strip() if qty_packed else ""
-                ws.cell(row=drug_row, column=next_block_start + 4).value = packer_id
+                ws.cell(row=drug_row, column=next_block_start + 4).value = packed_by_value
                 try:
                     rem = (int(qty_dispensed.text()) if qty_dispensed else 0) - (
                         int(qty_packed.text()) if qty_packed else 0)
@@ -8319,9 +9995,15 @@ class WebsterCalendarApp(QMainWindow):
                                  picked_up   = NULL, -- remove collection date
                                  due_date    = NULL, -- also clear due if needed
                                  packed_by   = ?,
-                                 checked_by  = NULL
+                                 checked_by  = ?,
+                                 needs_entry = 0
                              WHERE id = ?
-                             """, (pack_date, packer_id, self.current_patient_id))
+                             """, (
+                                    pack_date,
+                                    packed_by_value,
+                                    prechecked_by if prechecked_by else None,
+                                    self.current_patient_id
+            ))
 
             self.conn.commit()
 
@@ -8533,7 +10215,6 @@ class WebsterCalendarApp(QMainWindow):
         self.add_patient_window.close()
         self.open_patients_page()
 
-
     def handle_cease_patient(self):
         """Mark a selected patient as ceased, regardless of case/format."""
         selected = self.patient_table.currentRow()
@@ -8571,6 +10252,7 @@ class WebsterCalendarApp(QMainWindow):
             print(f"DEBUG: Error stopping DB watcher: {e}")
         event.accept()
 
+
 def send_ipc_command(command: str, server_name: str = SINGLE_INSTANCE_KEY, timeout_ms: int = 500) -> bool:
     sock = QLocalSocket()
     sock.connectToServer(server_name)
@@ -8602,6 +10284,7 @@ def attach_ipc_listener(server: QLocalServer, app: QApplication) -> None:
 
     server.newConnection.connect(on_new_connection)
 
+
 # --- file: DAA_Calendar.py ---
 
 if __name__ == "__main__":
@@ -8624,12 +10307,14 @@ if __name__ == "__main__":
         sock.disconnectFromServer()
         return True
 
+
     def attach_ipc_listener(server: "QLocalServer", app: "QApplication") -> None:
         """
         Makes THIS instance respond to IPC commands from later-launched instances.
         Supported:
           - QUIT: gracefully exits this instance.
         """
+
         def on_new_connection():
             while server.hasPendingConnections():
                 conn = server.nextPendingConnection()
@@ -8646,6 +10331,7 @@ if __name__ == "__main__":
                     app.quit()
 
         server.newConnection.connect(on_new_connection)
+
 
     # ---------------------------
     # Load stored settings (your existing logic)
@@ -8704,16 +10390,19 @@ if __name__ == "__main__":
             "Would you like to relaunch DAACal?"
         )
 
+
         def render_popup_text() -> None:
             msg.setText(
                 base_text
                 + f"<br><br><span style='font-size:10pt;'>Closing in <b>{remaining_secs['v']}</b> seconds…</span>"
             )
 
+
         render_popup_text()
 
         countdown_timer = QTimer(msg)
         countdown_timer.setInterval(1000)
+
 
         def on_tick() -> None:
             remaining_secs["v"] = max(0, remaining_secs["v"] - 1)
@@ -8721,6 +10410,7 @@ if __name__ == "__main__":
             if remaining_secs["v"] <= 0:
                 countdown_timer.stop()
                 msg.reject()
+
 
         countdown_timer.timeout.connect(on_tick)
         countdown_timer.start()
@@ -8755,6 +10445,7 @@ if __name__ == "__main__":
 
         wait_remaining = {"v": int(retries_ms_total / 1000)}
 
+
         def render_wait_text() -> None:
             wait_box.setText(
                 "<b>Relaunching…</b><br>"
@@ -8762,17 +10453,21 @@ if __name__ == "__main__":
                 f"<br><br><span style='font-size:10pt;'>Waiting up to <b>{wait_remaining['v']}</b> seconds…</span>"
             )
 
+
         render_wait_text()
 
         wait_countdown_timer = QTimer(wait_box)
         wait_countdown_timer.setInterval(1000)
 
+
         def wait_tick() -> None:
             wait_remaining["v"] = max(0, wait_remaining["v"] - 1)
             render_wait_text()
 
+
         wait_countdown_timer.timeout.connect(wait_tick)
         wait_countdown_timer.start()
+
 
         def try_acquire() -> None:
             server_box["server"] = ensure_single_instance()
@@ -8786,6 +10481,7 @@ if __name__ == "__main__":
                 return
 
             QTimer.singleShot(retry_every_ms, try_acquire)
+
 
         QTimer.singleShot(0, try_acquire)
         wait_box.exec_()
@@ -8819,6 +10515,7 @@ if __name__ == "__main__":
     # Keep references on the app so they don't get GC'd
     app.auto_close_timer = auto_close_timer
     app.auto_close_warning_timer = auto_close_warning_timer
+
 
     def show_auto_close_warning():
         """
@@ -8881,6 +10578,7 @@ if __name__ == "__main__":
             print("DEBUG: User chose to close DAACal immediately from countdown dialog.")
             app.quit()
 
+
     # Hook timers
     auto_close_warning_timer.timeout.connect(show_auto_close_warning)
     auto_close_timer.timeout.connect(app.quit)
@@ -8890,7 +10588,7 @@ if __name__ == "__main__":
     auto_close_timer.start(total_ms)
 
     # Set global icon for all dialogs and widgets
-    icon_path = os.path.join(BASE_DIR, "DAACal.ico")
+    icon_path = resource_path(os.path.join("DAACal.ico"))
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
     else:
@@ -8899,10 +10597,12 @@ if __name__ == "__main__":
     # PATCH: Force all QMainWindow instances to also get this icon
     _original_init = QMainWindow.__init__
 
+
     def _patched_init(self, *args, **kwargs):
         _original_init(self, *args, **kwargs)
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
+
 
     QMainWindow.__init__ = _patched_init
 
@@ -8932,10 +10632,3 @@ if __name__ == "__main__":
     QTimer.singleShot(20000, lambda: check_for_update_only(mainWin))
 
     app.exec_()
-
-
-
-
-
-
-
