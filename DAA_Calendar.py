@@ -42,7 +42,7 @@ from PyQt5.QtWidgets import (QToolButton, QFrame,
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 GITHUB_OWNER = "ryanchetty"
 GITHUB_REPO = "daa-calendar"
 INSTALLER_ASSET_NAME = "DAACal_Installer.exe"
@@ -7399,7 +7399,7 @@ class WebsterCalendarApp(QMainWindow):
         self.login_input.returnPressed.connect(self.assign_active_user)
 
         self.inactivity_timer = QTimer()
-        self.inactivity_timer.setInterval(120000)
+        self.inactivity_timer.setInterval(5 * 60 * 1000)
 
         self.inactivity_timer.timeout.connect(self.clear_active_user_due_to_timeout)
         self.installEventFilter(self)
@@ -7455,6 +7455,7 @@ class WebsterCalendarApp(QMainWindow):
         self.disable_patient_controls()
         self.viewing_ceased = False
         self.active_user_id = None
+        QTimer.singleShot(0, self.enforce_login)
 
     def setup_table(self):
         headers = ["", "#", "$", "Name", "Date Packed", "Picked Up", "Due Date", "Days Till Due", "Notes"]
@@ -9044,8 +9045,8 @@ class WebsterCalendarApp(QMainWindow):
         if self.active_user:
             return True
 
-        dialog = QDialog(self, flags=Qt.FramelessWindowHint)
-        dialog.setModal(True)
+        dialog = QDialog(self, Qt.FramelessWindowHint | Qt.Dialog)
+        dialog.setWindowModality(Qt.ApplicationModal)
         dialog.setFixedSize(480, 500)
         dialog.setStyleSheet("background-color: rgb(228, 224, 219);")
 
@@ -9093,6 +9094,9 @@ class WebsterCalendarApp(QMainWindow):
 
         layout.setAlignment(Qt.AlignCenter)
         dialog.setLayout(layout)
+        dialog.raise_()
+        dialog.activateWindow()
+        login_field.setFocus()
         dialog.exec_()
 
         return bool(self.active_user)
@@ -9420,12 +9424,11 @@ class WebsterCalendarApp(QMainWindow):
             )
             return
 
-        # Create as a standalone top-level dialog window
-        self.check_window = QWidget(None, Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+        # Keep this window above DAACal without making it float above unrelated apps.
+        self.check_window = QWidget(self, Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
         self.check_window.setWindowTitle("Select Packs to Check")
         self.check_window.adjustSize()
         self.check_window.setWindowModality(Qt.NonModal)
-        self.check_window.setWindowFlag(Qt.WindowStaysOnTopHint, True)
 
         layout = QVBoxLayout()
         layout.setSpacing(6)  # reduce space between widgets
@@ -9929,13 +9932,17 @@ class WebsterCalendarApp(QMainWindow):
                 packer_id = "".join([p[0].upper() for p in packer_id.split()])
 
             self.cur.execute(
-                "SELECT checked_by, needs_entry FROM patients WHERE id = ?",
+                "SELECT checked_by, needs_entry, picked_up, due_date FROM patients WHERE id = ?",
                 (self.current_patient_id,)
             )
             pending_row = self.cur.fetchone()
             prechecked_by = ""
+            pending_needs_entry = False
+            already_collected_or_scheduled = False
             if pending_row and int(pending_row[1] or 0) == 1:
+                pending_needs_entry = True
                 prechecked_by = (pending_row[0] or "").strip()
+                already_collected_or_scheduled = bool((pending_row[2] or "").strip() or (pending_row[3] or "").strip())
 
             if prechecked_by:
                 packed_by_value = f"{packer_id}/{prechecked_by}"
@@ -9988,22 +9995,37 @@ class WebsterCalendarApp(QMainWindow):
 
             wb.save(self.excel_path)
 
-            # Mark patient as unchecked in DB
-            self.cur.execute("""
-                             UPDATE patients
-                             SET date_packed = ?,
-                                 picked_up   = NULL, -- remove collection date
-                                 due_date    = NULL, -- also clear due if needed
-                                 packed_by   = ?,
-                                 checked_by  = ?,
-                                 needs_entry = 0
-                             WHERE id = ?
-                             """, (
-                                    pack_date,
-                                    packed_by_value,
-                                    prechecked_by if prechecked_by else None,
-                                    self.current_patient_id
-            ))
+            if pending_needs_entry and already_collected_or_scheduled:
+                # The pack entry belongs in the log, but the patient row is already
+                # scheduled from collection; keep those dates so they remain due.
+                self.cur.execute("""
+                                 UPDATE patients
+                                 SET packed_by   = ?,
+                                     checked_by  = ?,
+                                     needs_entry = 0
+                                 WHERE id = ?
+                                 """, (
+                                        packed_by_value,
+                                        prechecked_by if prechecked_by else None,
+                                        self.current_patient_id
+                ))
+            else:
+                # Mark patient as unchecked in DB
+                self.cur.execute("""
+                                 UPDATE patients
+                                 SET date_packed = ?,
+                                     picked_up   = NULL, -- remove collection date
+                                     due_date    = NULL, -- also clear due if needed
+                                     packed_by   = ?,
+                                     checked_by  = ?,
+                                     needs_entry = 0
+                                 WHERE id = ?
+                                 """, (
+                                        pack_date,
+                                        packed_by_value,
+                                        prechecked_by if prechecked_by else None,
+                                        self.current_patient_id
+                ))
 
             self.conn.commit()
 
@@ -10628,6 +10650,7 @@ if __name__ == "__main__":
     # Create and show main window
     mainWin = WebsterCalendarApp(splash=splash)
     mainWin.showMaximized()
+    QTimer.singleShot(0, mainWin.enforce_login)
 
     QTimer.singleShot(20000, lambda: check_for_update_only(mainWin))
 
