@@ -20,10 +20,10 @@ from datetime import datetime, timedelta, date
 from PyQt5 import QtCore, QtWidgets, sip
 
 from PyQt5.QtCore import (Qt, QTimer, QEvent, QObject, QMarginsF, pyqtSignal,
-                          pyqtSlot, QMetaObject, QDate, QPointF, QSize, QRectF,
+                          pyqtSlot, QMetaObject, QDate, QPointF, QSize, QRectF, QLineF,
                           QStandardPaths, QPropertyAnimation
                           )
-from PyQt5.QtGui import (QColor, QBrush, QFont, QIcon, QPainter, QPageLayout, QPageSize,
+from PyQt5.QtGui import (QColor, QBrush, QFont, QIcon, QPainter, QPageLayout, QPageSize, QPen,
                          QPixmap, QTextDocument, QImage, QTransform, QMovie, QPainterPath, QRegion
                          )
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket
@@ -42,7 +42,7 @@ from PyQt5.QtWidgets import (QToolButton, QFrame,
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.1"
 GITHUB_OWNER = "ryanchetty"
 GITHUB_REPO = "daa-calendar"
 INSTALLER_ASSET_NAME = "DAACal_Installer.exe"
@@ -4552,7 +4552,7 @@ def ensure_webster_database(db_path: str) -> None:
                     pack_size
                     TEXT
                     DEFAULT
-                    'Large',
+                    '16 mm',
                     partial_supply
                     TEXT
                     DEFAULT
@@ -4572,7 +4572,7 @@ def ensure_webster_database(db_path: str) -> None:
                     weeks_per_blister
                     TEXT
                     DEFAULT
-                    '4 weeks',
+                    '1 week',
                     medicare
                     TEXT
                     DEFAULT
@@ -4611,12 +4611,12 @@ def ensure_webster_database(db_path: str) -> None:
         "paused": "INTEGER DEFAULT 0",
         "flagged": "INTEGER DEFAULT 0",
         "ceased": "INTEGER DEFAULT 0",
-        "pack_size": "TEXT DEFAULT 'Large'",
+        "pack_size": "TEXT DEFAULT '16 mm'",
         "partial_supply": "TEXT DEFAULT 'N'",
         "checked_by": "TEXT DEFAULT ''",
         "packed_by": "TEXT DEFAULT ''",
         "given_out_by": "TEXT DEFAULT ''",
-        "weeks_per_blister": "TEXT DEFAULT '4 weeks'",
+        "weeks_per_blister": "TEXT DEFAULT '1 week'",
         "medicare": "TEXT DEFAULT ''",
         "concession": "TEXT DEFAULT ''",
         "pack_date": "TEXT DEFAULT ''",
@@ -4631,6 +4631,14 @@ def ensure_webster_database(db_path: str) -> None:
     for col, definition in patient_columns.items():
         if col not in existing_patient_cols and col != "id":
             cur.execute(f"ALTER TABLE patients ADD COLUMN {col} {definition}")
+
+    cur.execute("""
+        UPDATE patients
+        SET pack_size = '16 mm'
+        WHERE pack_size IS NULL
+           OR TRIM(pack_size) = ''
+           OR LOWER(TRIM(pack_size)) IN ('small', 'large')
+    """)
 
     # -------------------------
     # notes_log
@@ -5387,8 +5395,112 @@ class AnimatedGifIconDelegate(QStyledItemDelegate):
 
         return super().paint(painter, option, index)
 
+
+class CalendarRowDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        opt.state &= ~QtWidgets.QStyle.State_HasFocus
+        is_selected = bool(opt.state & QtWidgets.QStyle.State_Selected)
+        row_bg = index.data(Qt.UserRole + 1)
+        if is_selected and isinstance(row_bg, QColor):
+            opt.state &= ~QtWidgets.QStyle.State_Selected
+            row_bg = QColor("#dbeafe")
+
+        if isinstance(row_bg, QColor):
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(row_bg)
+
+            rect = QRectF(option.rect).adjusted(0, 4, 0, -4)
+            table = option.widget
+            first_col = 0
+            last_col = index.model().columnCount() - 1
+            if table is not None:
+                visible_cols = [
+                    col for col in range(index.model().columnCount())
+                    if not table.isColumnHidden(col)
+                ]
+                if visible_cols:
+                    first_col = visible_cols[0]
+                    last_col = visible_cols[-1]
+
+            if index.column() == first_col or index.column() == last_col:
+                painter.drawRoundedRect(rect, 8, 8)
+                if index.column() == first_col:
+                    painter.fillRect(rect.adjusted(rect.width() / 2, 0, 0, 0), row_bg)
+                if index.column() == last_col:
+                    painter.fillRect(rect.adjusted(0, 0, -rect.width() / 2, 0), row_bg)
+            else:
+                painter.fillRect(rect, row_bg)
+            painter.restore()
+
+        super().paint(painter, opt, index)
+
+        painter.save()
+        if index.column() == 0:
+            color = index.data(Qt.UserRole)
+            if isinstance(color, QColor):
+                strip_rect = QRectF(option.rect.x() + 2, option.rect.y() + 8, 6, option.rect.height() - 16)
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(color)
+                painter.drawRoundedRect(strip_rect, 3, 3)
+        painter.restore()
+
+        if index.data(Qt.UserRole + 2):
+            table = option.widget
+            phase_on = True
+            first_col = 0
+            last_col = index.model().columnCount() - 1
+            if table is not None:
+                phase_on = bool(table.property("urgentFlashOn"))
+                visible_cols = [
+                    col for col in range(index.model().columnCount())
+                    if not table.isColumnHidden(col)
+                ]
+                if visible_cols:
+                    first_col = visible_cols[0]
+                    last_col = visible_cols[-1]
+
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            color = QColor("#ff0000")
+            color.setAlpha(210 if phase_on else 70)
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(Qt.NoBrush)
+            rect = QRectF(option.rect).adjusted(1, 5, -1, -5)
+            if index.column() == first_col:
+                painter.drawLine(QLineF(rect.left() + 8, rect.top(), rect.right(), rect.top()))
+                painter.drawLine(QLineF(rect.left() + 8, rect.bottom(), rect.right(), rect.bottom()))
+                painter.drawLine(QLineF(rect.left(), rect.top() + 8, rect.left(), rect.bottom() - 8))
+                painter.drawArc(QRectF(rect.left(), rect.top(), 16, 16), 90 * 16, 90 * 16)
+                painter.drawArc(QRectF(rect.left(), rect.bottom() - 16, 16, 16), 180 * 16, 90 * 16)
+            elif index.column() == last_col:
+                painter.drawLine(QLineF(rect.left(), rect.top(), rect.right() - 8, rect.top()))
+                painter.drawLine(QLineF(rect.left(), rect.bottom(), rect.right() - 8, rect.bottom()))
+                painter.drawLine(QLineF(rect.right(), rect.top() + 8, rect.right(), rect.bottom() - 8))
+                painter.drawArc(QRectF(rect.right() - 16, rect.top(), 16, 16), 0, 90 * 16)
+                painter.drawArc(QRectF(rect.right() - 16, rect.bottom() - 16, 16, 16), 270 * 16, 90 * 16)
+            else:
+                painter.drawLine(QLineF(rect.left(), rect.top(), rect.right(), rect.top()))
+                painter.drawLine(QLineF(rect.left(), rect.bottom(), rect.right(), rect.bottom()))
+            painter.restore()
+
+
 class WebsterCalendarApp(QMainWindow):
     db_changed_signal = pyqtSignal()
+
+    CAL_COL_STRIP = 0
+    CAL_COL_ALERT = 1
+    CAL_COL_NUMBER = 2
+    CAL_COL_CHARGE = 3
+    CAL_COL_NAME = 4
+    CAL_COL_DATE_PACKED = 5
+    CAL_COL_PICKED_UP = 6
+    CAL_COL_DUE_DATE = 7
+    CAL_COL_DAYS = 8
+    CAL_COL_NOTES = 9
 
     def open_calendar_row_context_menu(self, pos):
         row = self.table.rowAt(pos.y())
@@ -5396,12 +5508,12 @@ class WebsterCalendarApp(QMainWindow):
             return
 
         self.table.selectRow(row)
-        self.table.setCurrentCell(row, 1)
+        self.table.setCurrentCell(row, self.CAL_COL_NUMBER)
 
         if not self.enforce_login():
             return
 
-        number_item = self.table.item(row, 1)
+        number_item = self.table.item(row, self.CAL_COL_NUMBER)
         if not number_item:
             return
 
@@ -5432,20 +5544,18 @@ class WebsterCalendarApp(QMainWindow):
         menu = QtWidgets.QMenu(self)
 
         create_entry_action = None
+        mark_packed_action = None
         mark_checked_action = None
         collected_action = None
         manual_due_date_action = None
 
+        mark_packed_action = menu.addAction("Mark as Packed")
+        mark_checked_action = menu.addAction("Mark as Checked")
+
         create_entry_action = menu.addAction("Create entry")
 
-        if has_needs_checking_icon:
-            mark_checked_action = menu.addAction("Mark as Checked")
-
-        elif is_green_row:
+        if is_green_row:
             collected_action = menu.addAction("Collected")
-
-        else:
-            mark_checked_action = menu.addAction("Mark as Checked")
 
         if not is_green_row:
             manual_due_date_action = menu.addAction("Set manual due date")
@@ -5457,13 +5567,17 @@ class WebsterCalendarApp(QMainWindow):
 
         if selected == create_entry_action:
             self.table.selectRow(row)
-            self.table.setCurrentCell(row, 1)
+            self.table.setCurrentCell(row, self.CAL_COL_NUMBER)
             self.handle_new_packed_action()
+            return
+
+        if selected == mark_packed_action:
+            self.mark_packed_needs_pack_entry(number)
             return
 
         if selected == collected_action:
             self.table.selectRow(row)
-            self.table.setCurrentCell(row, 1)
+            self.table.setCurrentCell(row, self.CAL_COL_NUMBER)
             self.handle_collected_action()
             return
 
@@ -5607,6 +5721,26 @@ class WebsterCalendarApp(QMainWindow):
         dialog.move(x, y)
 
         dialog.exec_()
+
+    def mark_packed_needs_pack_entry(self, number):
+        if not self.enforce_login():
+            return
+
+        today = datetime.today().strftime("%d/%m/%Y")
+
+        self.cur.execute("""
+                         UPDATE patients
+                         SET date_packed = ?,
+                             picked_up   = NULL,
+                             due_date    = NULL,
+                             packed_by   = '',
+                             checked_by  = '',
+                             needs_entry = 1
+                         WHERE number = ?
+                         """, (today, number))
+
+        self.conn.commit()
+        self.load_data()
 
     def mark_checked_needs_pack_entry(self, number):
         if not self.enforce_login():
@@ -6287,17 +6421,18 @@ class WebsterCalendarApp(QMainWindow):
         note.setStyleSheet("""
             QDialog {
                 background-color: #F4F1EC;
-                border: 2px solid #333333;
-                border-radius: 10px;
+                border: 3px solid #333333;
+                border-radius: 13px;
             }
             QLabel {
                 color: #111111;
+                font-size: 13pt;
             }
         """)
 
         layout = QHBoxLayout(note)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(15, 12, 15, 12)
+        layout.setSpacing(13)
 
         logo_label = QLabel()
         logo_path = resource_path("DAACal.png")
@@ -6307,7 +6442,7 @@ class WebsterCalendarApp(QMainWindow):
         if os.path.exists(logo_path):
             logo_label.setPixmap(
                 QPixmap(logo_path).scaled(
-                    42, 42, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    53, 53, Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
             )
 
@@ -6315,13 +6450,13 @@ class WebsterCalendarApp(QMainWindow):
 
         text_label = QLabel(f"<b>{title}</b><br>{message}")
         text_label.setWordWrap(True)
-        text_label.setMinimumWidth(260)
+        text_label.setMinimumWidth(325)
         layout.addWidget(text_label)
 
         note.adjustSize()
 
         path = QPainterPath()
-        path.addRoundedRect(0, 0, note.width(), note.height(), 10, 10)
+        path.addRoundedRect(0, 0, note.width(), note.height(), 13, 13)
         region = QRegion(path.toFillPolygon().toPolygon())
         note.setMask(region)
 
@@ -6333,8 +6468,8 @@ class WebsterCalendarApp(QMainWindow):
 
         def reposition_notifications():
             screen = QApplication.primaryScreen().availableGeometry()
-            margin = 20
-            gap = 10
+            margin = 25
+            gap = 13
 
             y = screen.bottom() - margin
 
@@ -7035,34 +7170,8 @@ class WebsterCalendarApp(QMainWindow):
         # --- If Calendar tab was closed, rebuild it from scratch ---
         if closing_calendar:
             try:
-                # destroy old calendar page completely
                 old_widget = self.main_widget
-                self.main_widget = QWidget()
-                self.layout = QVBoxLayout()
-                self.main_widget.setLayout(self.layout)
-
-                # rebuild toolbar
-                self.top_buttons = QHBoxLayout()
-
-                self.top_buttons.addWidget(self.print_button)
-                self.top_buttons.addWidget(self.new_packed_button)
-                self.top_buttons.addWidget(self.checked_button)
-                self.top_buttons.addWidget(self.collected_button)
-                self.top_buttons.addWidget(self.flag_button)
-                self.top_buttons.addWidget(self.pause_button)
-                self.top_buttons.addWidget(self.login_input)
-                self.layout.addLayout(self.top_buttons)
-
-                # rebuild table widget completely
-                self.table = QTableWidget()
-                self.table.verticalHeader().setVisible(False)
-                #self.table.cellClicked.connect(self.handle_warning_click)
-                self.table.cellPressed.connect(self.table_mouse_click)
-                self.table.cellDoubleClicked.connect(self.open_patient_tab)
-                self.layout.addWidget(self.table)
-
-                self.setup_table()
-                self.table.setItemPrototype(DateItem("01/01/2000"))
+                self.build_calendar_dashboard(insert_index=0)
 
                 ceased = bool(
                     getattr(self, "view_ceased_action", None)
@@ -7070,10 +7179,10 @@ class WebsterCalendarApp(QMainWindow):
                 )
                 self.load_data(ceased=ceased)
 
-                self.tabs.insertTab(0, self.main_widget, "Calendar")
                 self.tabs.setCurrentWidget(self.main_widget)
 
-                old_widget.deleteLater()
+                if old_widget is not None:
+                    old_widget.deleteLater()
 
             except Exception as e:
                 print("DEBUG: Failed to rebuild Calendar tab:", e)
@@ -7111,6 +7220,7 @@ class WebsterCalendarApp(QMainWindow):
         super().__init__()
 
         self.daacal_notifications = []
+        self.login_dialog = None
 
         self._startup_step("Loading DAACal...\nStarting up...")
 
@@ -7248,10 +7358,8 @@ class WebsterCalendarApp(QMainWindow):
         self.tabs.tabCloseRequested.connect(self.try_close_tab_by_index)
         self.setCentralWidget(self.tabs)
 
-        self.main_widget = QWidget()
-        self.layout = QVBoxLayout()
-        self.main_widget.setLayout(self.layout)
-        self.tabs.addTab(self.main_widget, "Calendar")
+        self.main_widget = None
+        self.layout = None
 
         self.site_bar = QLabel(f'{get_site_name()}')
         self.site_bar.setAlignment(Qt.AlignLeft)
@@ -7336,8 +7444,6 @@ class WebsterCalendarApp(QMainWindow):
 
         self._startup_step("Loading DAACal...\nBuilding toolbar...")
 
-        self.top_buttons = QHBoxLayout()
-
         self.undo_button.clicked.connect(self.perform_undo)
         self.redo_button.clicked.connect(self.perform_redo)
         self.undo_button.setFixedSize(30, 30)
@@ -7346,10 +7452,10 @@ class WebsterCalendarApp(QMainWindow):
         self.print_button = QPushButton('Print')
         self.print_button.clicked.connect(self.handle_print_action)
 
-        self.checked_button = QPushButton('Checked')
+        self.checked_button = QPushButton('Mark as Checked')
         self.checked_button.clicked.connect(self.handle_checked_action)
 
-        self.new_packed_button = QPushButton('Pack')
+        self.new_packed_button = QPushButton('Create Entry')
         self.new_packed_button.clicked.connect(lambda: self.handle_new_packed_action())
         self.collected_button = QPushButton('Collected')
         self.collected_button.clicked.connect(self.handle_collected_action)
@@ -7367,26 +7473,9 @@ class WebsterCalendarApp(QMainWindow):
         self.login_input.mousePressEvent = self.login_click_select_all
         self.login_input.textChanged.connect(self.clear_active_user_if_empty)
 
-        self.top_buttons.addWidget(self.print_button)
-        self.top_buttons.addWidget(self.new_packed_button)
-        self.top_buttons.addWidget(self.checked_button)
-        self.top_buttons.addWidget(self.collected_button)
-        self.top_buttons.addWidget(self.flag_button)
-        self.top_buttons.addWidget(self.pause_button)
-        self.top_buttons.addWidget(self.login_input)
-        self.layout.addLayout(self.top_buttons)
-
         self._startup_step("Loading DAACal...\nCreating calendar table...")
 
-        self.table = QTableWidget()
-        self.table.verticalHeader().setVisible(False)
-        #self.table.cellClicked.connect(self.handle_warning_click)
-        self.table.cellPressed.connect(self.table_mouse_click)
-        self.table.cellDoubleClicked.connect(self.open_patient_tab)
-        self.layout.addWidget(self.table)
-
-        self.setup_table()
-        self.table.setItemPrototype(DateItem("01/01/2000"))
+        self.build_calendar_dashboard()
 
         self._startup_step("Loading DAACal...\nLoading calendar data...")
 
@@ -7444,6 +7533,11 @@ class WebsterCalendarApp(QMainWindow):
         QTimer.singleShot(2000, do_check)
 
     def clear_active_user_due_to_timeout(self):
+        if getattr(self, "login_dialog", None) is not None and self.login_dialog.isVisible():
+            self.login_dialog.raise_()
+            self.login_dialog.activateWindow()
+            return
+
         self.active_user = None
         self.login_input.clear()
         self.login_input.setReadOnly(False)
@@ -7455,34 +7549,1280 @@ class WebsterCalendarApp(QMainWindow):
         self.disable_patient_controls()
         self.viewing_ceased = False
         self.active_user_id = None
-        QTimer.singleShot(0, self.enforce_login)
+        if QApplication.activeWindow() is not None:
+            QTimer.singleShot(0, self.enforce_login)
+
+    def build_calendar_dashboard(self, insert_index=None):
+        self.main_widget = QWidget()
+        self.main_widget.setObjectName("calendarMainWidget")
+        self.main_widget.setStyleSheet("""
+            QWidget#calendarMainWidget {
+                background: #ffffff;
+            }
+            QFrame#dashboardHeader {
+                background: #fbfcfe;
+                border: 1px solid #e7eaf0;
+                border-radius: 8px;
+            }
+            QLabel#dashboardSectionTitle {
+                color: #111827;
+                font-size: 8pt;
+                font-weight: 700;
+                text-transform: uppercase;
+            }
+            QFrame#dashboardSection {
+                background: #ffffff;
+                border: 1px solid #e7eaf0;
+                border-radius: 8px;
+            }
+            QFrame#dashboardAlertSection {
+                background: #fff1f1;
+                border: 1px solid #f5caca;
+                border-radius: 8px;
+            }
+            QFrame#dashboardAlertSectionClear {
+                background: #ffffff;
+                border: 1px solid #e7eaf0;
+                border-radius: 8px;
+            }
+            QLabel#dashboardMetricValue {
+                color: #dc2626;
+                font-size: 15pt;
+                font-weight: 800;
+            }
+            QLabel#dashboardMetricLabel {
+                color: #111827;
+                font-size: 8pt;
+            }
+        """)
+
+        self.layout = QVBoxLayout()
+        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.layout.setSpacing(10)
+        self.main_widget.setLayout(self.layout)
+
+        self._build_calendar_dashboard_header()
+        self._create_calendar_tables()
+        self.setup_table()
+        self.table.setItemPrototype(DateItem("01/01/2000"))
+        showing_ceased = bool(
+            getattr(self, "view_ceased_action", None)
+            and self.view_ceased_action.isChecked()
+        )
+        if showing_ceased:
+            self._populate_calendar_header_actions(showing_ceased=True)
+            if hasattr(self, "calendar_filter_bar"):
+                self.calendar_filter_bar.setVisible(False)
+
+        if insert_index is None:
+            self.tabs.addTab(self.main_widget, "Calendar")
+        else:
+            self.tabs.insertTab(insert_index, self.main_widget, "Calendar")
+
+    def _build_calendar_dashboard_header(self):
+        header = QFrame()
+        header.setObjectName("dashboardHeader")
+
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(12, 10, 12, 10)
+        header_layout.setSpacing(8)
+
+        zones = QHBoxLayout()
+        zones.setContentsMargins(0, 0, 0, 0)
+        zones.setSpacing(16)
+
+        workflow = self._make_dashboard_section("WORKFLOW")
+        self.workflow_body_layout = workflow.layout().itemAt(1).layout()
+        zones.addWidget(workflow, 5)
+
+        print_section = self._make_dashboard_section("PRINT")
+        self.print_body_layout = print_section.layout().itemAt(1).layout()
+        zones.addWidget(print_section, 1)
+
+        alerts = self._make_dashboard_section("ALERTS (0)", alert=True)
+        self.alerts_section = alerts
+        self.alerts_section_title = alerts.layout().itemAt(0).widget()
+        alerts_body = alerts.layout().itemAt(1).layout()
+        self.alert_to_entered_value = self._make_dashboard_metric(
+            alerts_body, "0", "To Be Entered", resource_path(os.path.join("icons", "needs_entering.gif"))
+        )
+        alerts_body.addWidget(self._make_dashboard_alert_separator())
+        self.alert_to_checked_value = self._make_dashboard_metric(
+            alerts_body, "0", "To Be Checked", resource_path(os.path.join("icons", "needs_checking.gif"))
+        )
+        alerts_body.addWidget(self._make_dashboard_alert_separator())
+        self.alert_warning_value = self._make_dashboard_metric(
+            alerts_body, "0", "Warnings", resource_path(os.path.join("icons", "warning_icon.gif"))
+        )
+        zones.addWidget(alerts, 3)
+
+        header_layout.addLayout(zones)
+        self._populate_calendar_header_actions(showing_ceased=False)
+
+        login_row = QHBoxLayout()
+        login_row.setContentsMargins(0, 0, 0, 0)
+        login_row.addStretch(1)
+        self.login_input.setFixedWidth(260)
+        login_row.addWidget(self.login_input)
+        header_layout.addLayout(login_row)
+
+        self.layout.addWidget(header)
+        self.refresh_calendar_header_counts()
+
+    def _clear_dashboard_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                self._detach_reusable_dashboard_buttons(widget)
+                widget.setParent(None)
+            elif child_layout is not None:
+                self._clear_dashboard_layout(child_layout)
+
+    def _detach_reusable_dashboard_buttons(self, container):
+        reusable_buttons = (
+            "new_packed_button",
+            "checked_button",
+            "collected_button",
+            "flag_button",
+            "pause_button",
+            "print_button",
+            "delete_button",
+            "restore_button",
+        )
+        for attr in reusable_buttons:
+            button = getattr(self, attr, None)
+            if button is None or sip.isdeleted(button):
+                continue
+            if button.parent() is container:
+                button.setParent(None)
+
+    def _ensure_dashboard_action_buttons(self):
+        button_specs = {
+            "print_button": ("Print Weekly Schedule", self.handle_print_action),
+            "checked_button": ("Checked", self.handle_checked_action),
+            "new_packed_button": ("Pack Entry", lambda: self.handle_new_packed_action()),
+            "collected_button": ("Collected", self.handle_collected_action),
+            "pause_button": ("Pause", self.toggle_pause),
+            "flag_button": ("Changes", self.toggle_flag),
+            "delete_button": ("Delete", self.handle_delete_ceased_patient),
+            "restore_button": ("Restore", self.handle_restore_ceased_patient),
+        }
+        for attr, (text, handler) in button_specs.items():
+            button = getattr(self, attr, None)
+            if button is not None and not sip.isdeleted(button):
+                continue
+            button = QPushButton(text)
+            button.clicked.connect(handler)
+            setattr(self, attr, button)
+
+    def _populate_calendar_header_actions(self, showing_ceased=False):
+        self._ensure_dashboard_action_buttons()
+        self._clear_dashboard_layout(self.workflow_body_layout)
+        self._clear_dashboard_layout(self.print_body_layout)
+
+        if showing_ceased:
+            self.workflow_body_layout.addWidget(
+                self._make_workflow_button_group("Ceased Patients", [self.delete_button, self.restore_button])
+            )
+            self._style_dashboard_button(self.delete_button, "danger")
+            self._style_dashboard_button(self.restore_button, "primary")
+            return
+
+        self.workflow_body_layout.addWidget(
+            self._make_workflow_button_group("Preparation", [self.new_packed_button])
+        )
+        self.workflow_body_layout.addWidget(
+            self._make_workflow_button_group("Verification", [self.checked_button])
+        )
+        self.workflow_body_layout.addWidget(
+            self._make_workflow_button_group("Completion", [self.collected_button])
+        )
+        self.workflow_body_layout.addWidget(
+            self._make_workflow_button_group("State Control", [self.flag_button, self.pause_button])
+        )
+
+        self.print_button.setText("Print Weekly Schedule")
+        self._style_dashboard_button(self.print_button, "neutral")
+        self.print_body_layout.addWidget(self.print_button)
+
+    def _make_dashboard_section(self, title, alert=False):
+        section = QFrame()
+        section.setObjectName("dashboardAlertSection" if alert else "dashboardSection")
+
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(12, 8, 12, 10)
+        layout.setSpacing(8)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("dashboardSectionTitle")
+        layout.addWidget(title_label)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(12)
+        layout.addLayout(body)
+
+        return section
+
+    def _make_workflow_button_group(self, label, buttons):
+        group = QWidget()
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        for button in buttons:
+            role = (
+                "success" if button is self.collected_button
+                else "danger" if button is self.pause_button
+                else "changes" if button is self.flag_button
+                else "primary"
+            )
+            self._style_dashboard_button(button, role)
+            row.addWidget(button)
+        layout.addLayout(row)
+        return group
+
+    def _style_dashboard_button(self, button, role):
+        button.setMinimumHeight(36)
+        button.setCursor(Qt.PointingHandCursor)
+
+        styles = {
+            "primary": ("#5b2dd6", "#ffffff", "#4c22bd"),
+            "success": ("#059669", "#ffffff", "#047857"),
+            "danger": ("#dc2626", "#ffffff", "#b91c1c"),
+            "changes": ("#ffc0cb", "#111111", "#f39aab"),
+            "neutral": ("#ffffff", "#111827", "#d9dee8"),
+        }
+        bg, fg, border = styles.get(role, styles["neutral"])
+        hover = border if role != "neutral" else "#f8fafc"
+        button.setStyleSheet(f"""
+            QPushButton {{
+                background: {bg};
+                color: {fg};
+                border: 1px solid {border};
+                border-radius: 6px;
+                padding: 7px 14px;
+                font-weight: 700;
+            }}
+            QPushButton:hover {{
+                background: {hover};
+            }}
+        """)
+
+    def _make_dashboard_metric(self, parent_layout, value, label, icon_path=None):
+        metric = QWidget()
+        layout = QVBoxLayout(metric)
+        layout.setContentsMargins(10, 2, 10, 2)
+        layout.setSpacing(2)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+        top_row.setAlignment(Qt.AlignCenter)
+
+        if icon_path and os.path.exists(icon_path):
+            icon_label = QLabel()
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setFixedSize(38, 34)
+            movie = QMovie(icon_path)
+            movie.setScaledSize(QSize(32, 32))
+            icon_label.setMovie(movie)
+            icon_label._movie = movie
+            movie.start()
+            top_row.addWidget(icon_label)
+
+        value_label = QLabel(value)
+        value_label.setObjectName("dashboardMetricValue")
+        value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        top_row.addWidget(value_label)
+
+        text_label = QLabel(label)
+        text_label.setObjectName("dashboardMetricLabel")
+        text_label.setAlignment(Qt.AlignCenter)
+
+        layout.addLayout(top_row)
+        layout.addWidget(text_label)
+        parent_layout.addWidget(metric)
+        return value_label
+
+    def _make_dashboard_alert_separator(self):
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFrameShadow(QFrame.Plain)
+        sep.setFixedHeight(42)
+        sep.setStyleSheet("color: #f0caca; background: #f0caca; max-width: 1px;")
+        return sep
+
+    def get_dashboard_counts(self):
+        counts = {
+            "needs_entry": 0,
+            "needs_checking": 0,
+            "warnings": 0,
+            "to_be_entered": 0,
+            "to_be_checked": 0,
+            "general_warnings": 0,
+            "total_alerts": 0,
+        }
+        try:
+            self.cur.execute("""
+                SELECT date_packed, picked_up, due_date, paused, flagged, packed_by, checked_by, needs_entry
+                FROM patients
+                WHERE ceased = 0
+            """)
+            today = datetime.today().date()
+            for date_packed, picked_up, due_date, paused, flagged, packed_by, checked_by, needs_entry in self.cur.fetchall():
+                packed_by = str(packed_by or "").strip()
+                checked_by = str(checked_by or "").strip()
+                if int(needs_entry or 0):
+                    counts["needs_entry"] += 1
+                if (int(needs_entry or 0) and not checked_by) or (packed_by and not checked_by and not int(needs_entry or 0)):
+                    counts["needs_checking"] += 1
+
+                has_warning = bool(flagged)
+                try:
+                    due_src = str(due_date or "").strip()
+                    if not due_src and str(picked_up or "").strip():
+                        due_src = (datetime.strptime(str(picked_up).strip(), "%d/%m/%Y") + timedelta(days=21)).strftime("%d/%m/%Y")
+                    if due_src and datetime.strptime(due_src, "%d/%m/%Y").date() < today:
+                        has_warning = True
+                except Exception:
+                    pass
+
+                try:
+                    if date_packed and not str(picked_up or "").strip():
+                        packed_date = datetime.strptime(str(date_packed).strip(), "%d/%m/%Y").date()
+                        if (today - packed_date).days > 30:
+                            has_warning = True
+                except Exception:
+                    pass
+
+                if has_warning:
+                    counts["warnings"] += 1
+        except Exception as e:
+            print("DEBUG: Failed to calculate dashboard counts:", e)
+
+        counts["to_be_entered"] = counts["needs_entry"]
+        counts["to_be_checked"] = counts["needs_checking"]
+        counts["general_warnings"] = counts["warnings"]
+        counts["total_alerts"] = (
+            counts["needs_entry"] +
+            counts["needs_checking"] +
+            counts["warnings"]
+        )
+        return counts
+
+    def _calendar_alert_counts(self):
+        return self.get_dashboard_counts()
+
+    def refresh_calendar_header_counts(self):
+        if not hasattr(self, "alert_to_entered_value"):
+            return
+
+        counts = self.get_dashboard_counts()
+        self.alert_to_entered_value.setText(str(counts["to_be_entered"]))
+        self.alert_to_checked_value.setText(str(counts["to_be_checked"]))
+        self.alert_warning_value.setText(str(counts["general_warnings"]))
+        self._style_dashboard_metric_value(self.alert_to_entered_value, counts["to_be_entered"])
+        self._style_dashboard_metric_value(self.alert_to_checked_value, counts["to_be_checked"])
+        self._style_dashboard_metric_value(self.alert_warning_value, counts["general_warnings"])
+
+        if hasattr(self, "alerts_section_title"):
+            self.alerts_section_title.setText("ALERTS")
+        if hasattr(self, "alerts_section"):
+            has_alerts = bool(counts["total_alerts"])
+            self.alerts_section.setObjectName("dashboardAlertSection" if has_alerts else "dashboardAlertSectionClear")
+            self.alerts_section.style().unpolish(self.alerts_section)
+            self.alerts_section.style().polish(self.alerts_section)
+        self.refresh_dashboard_quick_action_badges(counts)
+
+    def refresh_dashboard_quick_action_badges(self, counts=None):
+        counts = counts or self.get_dashboard_counts()
+        badge_map = {
+            "quick_to_entered_badge": counts["to_be_entered"],
+            "quick_to_checked_badge": counts["to_be_checked"],
+            "quick_warnings_badge": counts["general_warnings"],
+        }
+        for attr, value in badge_map.items():
+            badge = getattr(self, attr, None)
+            if badge is None:
+                continue
+            if sip.isdeleted(badge):
+                setattr(self, attr, None)
+                continue
+            badge.setText(str(value))
+            self._style_dashboard_metric_value(badge, value)
+
+    def _clear_dashboard_quick_action_badge_refs(self):
+        for attr in ("quick_to_entered_badge", "quick_to_checked_badge", "quick_warnings_badge"):
+            setattr(self, attr, None)
+
+    def _style_dashboard_metric_value(self, label, value):
+        color = "#dc2626" if int(value or 0) else "#111827"
+        label.setStyleSheet(f"color: {color};")
+
+    def _create_calendar_tables(self):
+        self._build_calendar_filter_row()
+
+        self.calendar_content_splitter = QSplitter(Qt.Horizontal)
+        self.calendar_content_splitter.setChildrenCollapsible(False)
+        self.calendar_content_splitter.setStyleSheet("""
+            QSplitter::handle {
+                background: #eef1f6;
+                width: 1px;
+            }
+        """)
+
+        self.calendar_table_area = QWidget()
+        self.calendar_table_area.setStyleSheet("background: white;")
+
+        table_layout = QVBoxLayout(self.calendar_table_area)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.setSpacing(0)
+
+        table_body = QWidget()
+        self.calendar_table_body = table_body
+        table_body_layout = QHBoxLayout(table_body)
+        table_body_layout.setContentsMargins(0, 0, 0, 0)
+        table_body_layout.setSpacing(0)
+
+        self.table = QTableWidget()
+        self.table.verticalHeader().setVisible(False)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        #self.table.cellClicked.connect(self.handle_warning_click)
+        self.table.cellPressed.connect(self.table_mouse_click)
+        self.table.cellDoubleClicked.connect(self.open_patient_tab)
+        self.table.viewport().installEventFilter(self)
+
+        self.notes_table = QTableWidget()
+        self.notes_table.setColumnCount(1)
+        self.notes_table.setHorizontalHeaderLabels(["Notes"])
+        self.notes_table.verticalHeader().setVisible(False)
+        self.notes_table.cellPressed.connect(self.notes_table_mouse_click)
+        self.notes_table.cellDoubleClicked.connect(lambda row, col: self.open_patient_tab(row, 8))
+        self.notes_table.viewport().installEventFilter(self)
+        self.notes_table.hide()
+
+        table_body_layout.addWidget(self.table, 1)
+        table_layout.addWidget(table_body, 0)
+        self._build_calendar_pagination_footer(table_layout)
+        table_layout.addStretch(1)
+        self.calendar_content_splitter.addWidget(self.calendar_table_area)
+
+        self.dashboard_detail_panel = self._build_dashboard_detail_panel()
+        self.calendar_content_splitter.addWidget(self.dashboard_detail_panel)
+        self.calendar_content_splitter.setStretchFactor(0, 65)
+        self.calendar_content_splitter.setStretchFactor(1, 35)
+        self.calendar_content_splitter.setSizes([940, 600])
+        self.layout.addWidget(self.calendar_content_splitter, 1)
+
+        self.table.verticalScrollBar().valueChanged.connect(self._sync_notes_scroll_from_main)
+        self.notes_table.verticalScrollBar().valueChanged.connect(self.table.verticalScrollBar().setValue)
+
+    def _build_calendar_pagination_footer(self, parent_layout):
+        self.current_page = getattr(self, "current_page", 1)
+        self.rows_per_page = getattr(self, "rows_per_page", 15)
+
+        footer = QFrame()
+        footer.setObjectName("calendarPaginationFooter")
+        footer.setStyleSheet("""
+            QFrame#calendarPaginationFooter {
+                background: #ffffff;
+                border: 1px solid #e7eaf0;
+                border-top: none;
+                border-bottom-left-radius: 8px;
+                border-bottom-right-radius: 8px;
+            }
+            QLabel#paginationSummary {
+                color: #475569;
+                font-size: 9pt;
+            }
+            QPushButton[paginationButton="true"] {
+                background: #ffffff;
+                border: 1px solid #e0e5ee;
+                border-radius: 6px;
+                color: #111827;
+                min-width: 32px;
+                min-height: 28px;
+                font-weight: 700;
+            }
+            QPushButton[paginationButton="true"]:checked {
+                background: #f6f0ff;
+                color: #5b2dd6;
+                border: 1px solid #b99cff;
+            }
+            QPushButton[paginationButton="true"]:disabled {
+                color: #94a3b8;
+            }
+        """)
+
+        layout = QHBoxLayout(footer)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(8)
+
+        self.pagination_summary_label = QLabel("Showing 0-0 of 0")
+        self.pagination_summary_label.setObjectName("paginationSummary")
+        layout.addWidget(self.pagination_summary_label)
+        layout.addStretch(1)
+
+        self.prev_page_button = self._make_pagination_button("<")
+        self.prev_page_button.clicked.connect(lambda: self.set_calendar_page(self.current_page - 1))
+        layout.addWidget(self.prev_page_button)
+
+        self.pagination_page_buttons_layout = QHBoxLayout()
+        self.pagination_page_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self.pagination_page_buttons_layout.setSpacing(6)
+        layout.addLayout(self.pagination_page_buttons_layout)
+
+        self.next_page_button = self._make_pagination_button(">")
+        self.next_page_button.clicked.connect(lambda: self.set_calendar_page(self.current_page + 1))
+        layout.addWidget(self.next_page_button)
+
+        parent_layout.addWidget(footer)
+
+    def _make_pagination_button(self, text):
+        btn = QPushButton(text)
+        btn.setCheckable(False)
+        btn.setProperty("paginationButton", True)
+        btn.setCursor(Qt.PointingHandCursor)
+        return btn
+
+    def _update_calendar_table_height(self):
+        if not hasattr(self, "table"):
+            return
+        rows_per_page = max(1, int(getattr(self, "rows_per_page", 15)))
+        row_height = self.table.verticalHeader().defaultSectionSize()
+        header_height = self.table.horizontalHeader().height()
+        table_height = header_height + (rows_per_page * row_height) + 2
+        self.table.setFixedHeight(table_height)
+        if hasattr(self, "calendar_table_body"):
+            self.calendar_table_body.setFixedHeight(table_height)
+
+    def _toggle_urgent_row_flash(self):
+        if not hasattr(self, "table"):
+            return
+        self.table.setProperty("urgentFlashOn", not bool(self.table.property("urgentFlashOn")))
+        self.table.viewport().update()
+
+    def _build_calendar_filter_row(self):
+        self.active_calendar_filter = getattr(self, "active_calendar_filter", "all")
+        self.calendar_filter_buttons = {}
+
+        self.calendar_filter_bar = QFrame()
+        self.calendar_filter_bar.setObjectName("calendarFilterBar")
+        self.calendar_filter_bar.setStyleSheet("""
+            QFrame#calendarFilterBar {
+                background: #ffffff;
+                border: 1px solid #e7eaf0;
+                border-radius: 8px;
+            }
+            QPushButton[filterChip="true"] {
+                background: #ffffff;
+                color: #111827;
+                border: 1px solid #e0e5ee;
+                border-radius: 6px;
+                padding: 8px 14px;
+                font-weight: 700;
+            }
+            QPushButton[filterChip="true"]:checked {
+                background: #f6f0ff;
+                color: #5b2dd6;
+                border: 1px solid #b99cff;
+            }
+            QLineEdit#calendarSearchInput {
+                background: #ffffff;
+                border: 1px solid #e0e5ee;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #111827;
+            }
+        """)
+
+        layout = QHBoxLayout(self.calendar_filter_bar)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        filters = [
+            ("all", "All"),
+            ("due_today", "Due Today"),
+            ("due_this_week", "Due This Week"),
+            ("due_next_week", "Due Next Week"),
+            ("needs_checking", "Needs Checking"),
+            ("ready_for_collection", "Ready For Collection"),
+            ("changes", "Changes"),
+            ("paused", "Paused"),
+        ]
+
+        for key, label in filters:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setProperty("filterChip", True)
+            btn.clicked.connect(lambda checked=False, f=key: self.set_calendar_filter(f))
+            layout.addWidget(btn)
+            self.calendar_filter_buttons[key] = btn
+
+        self._sync_calendar_filter_buttons()
+        layout.addStretch(1)
+
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("calendarSearchInput")
+        self.search_input.setPlaceholderText("Search name, pack #, notes...")
+        self.search_input.setMinimumWidth(300)
+        self.search_input.textChanged.connect(lambda *_: self.on_calendar_search_changed())
+        layout.addWidget(self.search_input)
+
+        self.calendar_sort_mode = getattr(self, "calendar_sort_mode", "default")
+        self.filter_icon_button = QPushButton()
+        self.filter_icon_button.setIcon(self._make_filter_icon())
+        self.filter_icon_button.clicked.connect(self.show_calendar_sort_menu)
+        self.filter_icon_button.setFixedWidth(42)
+        self.filter_icon_button.setFixedHeight(36)
+        self.filter_icon_button.setToolTip("Filter options")
+        self.filter_icon_button.setStyleSheet("""
+            QPushButton {
+                background: #ffffff;
+                border: 1px solid #e0e5ee;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #64748b;
+                font-weight: 700;
+            }
+        """)
+        layout.addWidget(self.filter_icon_button)
+
+        self.layout.addWidget(self.calendar_filter_bar)
+
+    def _make_filter_icon(self):
+        svg = b'''<svg width="24" height="24" viewBox="0 0 24 24"
+             xmlns="http://www.w3.org/2000/svg"
+             fill="none">
+          <path
+            d="M5 6H19L13.5 13V18L10.5 19.5V13L5 6Z"
+            stroke="#4B5563"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>'''
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        renderer = QSvgRenderer(svg)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+
+    def show_calendar_sort_menu(self):
+        menu = QtWidgets.QMenu(self)
+        options = [
+            ("default", "Filter by default"),
+            ("name", "By name"),
+            ("number", "By number"),
+            ("days", "By days till due"),
+            ("charge", "By charge"),
+        ]
+        active = getattr(self, "calendar_sort_mode", "default")
+        for key, label in options:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(key == active)
+            action.triggered.connect(lambda checked=False, k=key: self.set_calendar_sort_mode(k))
+        menu.exec_(self.filter_icon_button.mapToGlobal(self.filter_icon_button.rect().bottomLeft()))
+
+    def set_calendar_sort_mode(self, sort_mode):
+        self.calendar_sort_mode = sort_mode or "default"
+        self.current_page = 1
+        self.load_data(
+            ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+        )
+
+    def _build_dashboard_detail_panel(self):
+        panel = QFrame()
+        panel.setObjectName("dashboardDetailPanel")
+        panel.setStyleSheet("""
+            QFrame#dashboardDetailPanel {
+                background: #ffffff;
+                border: 1px solid #e7eaf0;
+                border-radius: 8px;
+            }
+            QLabel#emptyPatientIcon {
+                color: #6d3fd6;
+                font-size: 38pt;
+            }
+            QLabel#emptyPatientTitle {
+                color: #111827;
+                font-size: 14pt;
+                font-weight: 800;
+            }
+            QLabel#emptyPatientText {
+                color: #475569;
+                font-size: 9pt;
+            }
+            QLabel#detailPatientName {
+                color: #111827;
+                font-size: 15pt;
+                font-weight: 800;
+            }
+            QLabel#detailMeta {
+                color: #475569;
+                font-size: 9pt;
+            }
+            QLabel#detailSectionTitle {
+                color: #111827;
+                font-size: 8pt;
+                font-weight: 800;
+            }
+            QLabel#detailNote {
+                background: #fbfcfe;
+                border: 1px solid #e7eaf0;
+                border-radius: 6px;
+                color: #111827;
+                padding: 8px;
+            }
+            QFrame#dashboardPanelCard {
+                background: #ffffff;
+                border: 1px solid #e7eaf0;
+                border-radius: 8px;
+            }
+            QLabel#overviewValue {
+                font-size: 16pt;
+                font-weight: 800;
+            }
+            QLabel#overviewLabel {
+                color: #111827;
+                font-size: 9pt;
+            }
+            QPushButton#quickActionButton {
+                background: #ffffff;
+                border: 1px solid #e0e5ee;
+                border-radius: 6px;
+                color: #111827;
+                padding: 10px;
+                text-align: left;
+                font-weight: 700;
+            }
+            QPushButton#detailAddNoteButton {
+                background: #ffffff;
+                border: 1px solid #e0e5ee;
+                border-radius: 6px;
+                color: #111827;
+                padding: 7px 12px;
+                font-weight: 700;
+            }
+            QLineEdit#dashboardNoteInput {
+                background: #ffffff;
+                border: 1px solid #e0e5ee;
+                border-radius: 6px;
+                padding: 8px 10px;
+                color: #111827;
+            }
+        """)
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+        self.dashboard_detail_layout = layout
+        self.render_dashboard_empty_detail()
+        return panel
+
+    def render_dashboard_empty_detail(self):
+        if not hasattr(self, "dashboard_detail_layout"):
+            return
+
+        self._clear_dashboard_quick_action_badge_refs()
+        self._clear_dashboard_layout(self.dashboard_detail_layout)
+        self.dashboard_detail_layout.addStretch(1)
+
+        icon = QLabel()
+        icon.setObjectName("emptyPatientIcon")
+        icon.setAlignment(Qt.AlignCenter)
+        icon_svg = b'''<svg width="96" height="96" viewBox="0 0 96 96"
+             xmlns="http://www.w3.org/2000/svg">
+          <circle cx="48" cy="48" r="44"
+                  fill="#F5F3FF"
+                  stroke="#DDD6FE"
+                  stroke-width="2"/>
+          <circle cx="48" cy="38" r="7"
+                  fill="none"
+                  stroke="#8B5CF6"
+                  stroke-width="2"
+                  stroke-linecap="round"/>
+          <path d="M32 62C32 54 64 54 64 62"
+                fill="none"
+                stroke="#8B5CF6"
+                stroke-width="2"
+                stroke-linecap="round"/>
+        </svg>'''
+        icon_pixmap = QPixmap(96, 96)
+        icon_pixmap.fill(Qt.transparent)
+        painter = QPainter(icon_pixmap)
+        renderer = QSvgRenderer(icon_svg)
+        renderer.render(painter)
+        painter.end()
+        icon.setPixmap(icon_pixmap)
+        self.dashboard_detail_layout.addWidget(icon)
+
+        title = QLabel("No patient selected")
+        title.setObjectName("emptyPatientTitle")
+        title.setAlignment(Qt.AlignCenter)
+        self.dashboard_detail_layout.addWidget(title)
+
+        text = QLabel("Select a patient from the list to view details, notes and history.")
+        text.setObjectName("emptyPatientText")
+        text.setWordWrap(True)
+        text.setAlignment(Qt.AlignCenter)
+        self.dashboard_detail_layout.addWidget(text)
+
+        self.dashboard_detail_layout.addStretch(1)
+        self._add_dashboard_overview_cards()
+        self._add_dashboard_alert_quick_actions()
+        self.dashboard_detail_layout.addStretch(1)
+
+    def _make_dashboard_card(self):
+        card = QFrame()
+        card.setObjectName("dashboardPanelCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        return card, layout
+
+    def get_dashboard_overview_counts(self):
+        counts = {
+            "due_today": 0,
+            "due_this_week": 0,
+            "due_next_week": 0,
+            "needs_checking": 0,
+            "ready_for_collection": 0,
+            "paused": 0,
+        }
+        try:
+            self.cur.execute("""
+                SELECT id, number, charge, name, date_packed, picked_up, due_date, days_till_due, notes, paused, flagged, packed_by, checked_by, needs_entry
+                FROM patients
+                WHERE ceased = 0
+            """)
+            rows = [list(r) for r in self.cur.fetchall()]
+            today = datetime.today().date()
+            start_of_week = today - timedelta(days=today.weekday())
+            end_of_week = start_of_week + timedelta(days=6)
+            next_week_start = start_of_week + timedelta(days=7)
+            next_week_end = start_of_week + timedelta(days=13)
+            for row in rows:
+                due_date = self._calendar_effective_due_date(row)
+                if due_date == today:
+                    counts["due_today"] += 1
+                if due_date and start_of_week <= due_date <= end_of_week:
+                    counts["due_this_week"] += 1
+                if due_date and next_week_start <= due_date <= next_week_end:
+                    counts["due_next_week"] += 1
+                if self._calendar_row_matches_filter(row, "needs_checking"):
+                    counts["needs_checking"] += 1
+                if self._calendar_row_matches_filter(row, "ready_for_collection"):
+                    counts["ready_for_collection"] += 1
+                if row[9]:
+                    counts["paused"] += 1
+        except Exception as e:
+            print("DEBUG: Failed to calculate dashboard overview counts:", e)
+        return counts
+
+    def _add_dashboard_overview_cards(self):
+        card, layout = self._make_dashboard_card()
+        title = QLabel("OVERVIEW")
+        title.setObjectName("detailSectionTitle")
+        layout.addWidget(title)
+
+        counts = self.get_dashboard_overview_counts()
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(8)
+
+        items = [
+            # key, label, border, value_text, background
+            ("due_today", "Due Today", "#FFD600", "#B28900", "#FFFDE7"),
+            ("due_this_week", "Due This Week", "#FFD600", "#B28900", "#FFFDE7"),
+            ("due_next_week", "Due Next Week", "#B58AE3", "#B58AE3", "#FFFFFF"),
+            ("needs_checking", "Needs Checking", "#2563EB", "#2563EB", "#FFFFFF"),
+            ("ready_for_collection", "Ready For Collection", "#00FF00", "#00CC00", "#FFFFFF"),
+            ("paused", "Paused", "#FF0000", "#FF0000", "#FFFFFF"),
+        ]
+
+        for idx, (key, label, border_color, value_color, bg_color) in enumerate(items):
+            tile = QFrame()
+            tile.setStyleSheet(
+                f"""
+                QFrame {{
+                    border: 1px solid {border_color};
+                    border-radius: 6px;
+                    background: {bg_color};
+                }}
+                """
+            )
+
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(8, 8, 8, 8)
+
+            value = QLabel(str(counts[key]))
+            value.setObjectName("overviewValue")
+            value.setAlignment(Qt.AlignCenter)
+            value.setStyleSheet(f"color: {value_color}; border: none; background: transparent;")
+
+            text = QLabel(label)
+            text.setObjectName("overviewLabel")
+            text.setAlignment(Qt.AlignCenter)
+            text.setStyleSheet("border: none; background: transparent; color: #111111;")
+
+            tile_layout.addWidget(value)
+            tile_layout.addWidget(text)
+
+            grid.addWidget(tile, idx // 3, idx % 3)
+
+        layout.addLayout(grid)
+        self.dashboard_detail_layout.addWidget(card)
+    def _make_quick_action(self, label, filter_key, badge_attr=None, badge_value=None):
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        button = QPushButton(label)
+        button.setObjectName("quickActionButton")
+        button.clicked.connect(lambda checked=False, f=filter_key: self.set_calendar_filter(f))
+        layout.addWidget(button, 1)
+
+        if badge_attr is not None:
+            badge = QLabel(str(badge_value or 0))
+            badge.setAlignment(Qt.AlignCenter)
+            badge.setMinimumWidth(38)
+            badge.setStyleSheet("background: #f6f0ff; border: 1px solid #d8c7ff; border-radius: 6px; padding: 5px; font-weight: 800;")
+            setattr(self, badge_attr, badge)
+            layout.addWidget(badge)
+        return row
+
+    def _add_dashboard_alert_quick_actions(self):
+        card, layout = self._make_dashboard_card()
+        title = QLabel("QUICK ACTIONS")
+        title.setObjectName("detailSectionTitle")
+        layout.addWidget(title)
+        counts = self.get_dashboard_counts()
+        layout.addWidget(self._make_quick_action("View Patients To Be Entered", "to_be_entered", "quick_to_entered_badge", counts["to_be_entered"]))
+        layout.addWidget(self._make_quick_action("View Patients To Be Checked", "needs_checking", "quick_to_checked_badge", counts["to_be_checked"]))
+        layout.addWidget(self._make_quick_action("View Patients With Warnings", "warnings", "quick_warnings_badge", counts["general_warnings"]))
+        self.dashboard_detail_layout.addWidget(card)
+        self.refresh_dashboard_quick_action_badges(counts)
+
+    def render_dashboard_patient_detail(self, table_row):
+        if not hasattr(self, "dashboard_detail_layout") or table_row < 0:
+            return
+
+        number_item = self.table.item(table_row, self.CAL_COL_NUMBER)
+        if not number_item:
+            self.render_dashboard_empty_detail()
+            return
+
+        number = number_item.text().strip()
+        self.cur.execute("""
+            SELECT id, number, name, date_packed, picked_up, due_date, notes, paused, flagged, packed_by, checked_by, needs_entry, pack_size
+            FROM patients
+            WHERE number = ?
+        """, (number,))
+        patient = self.cur.fetchone()
+        if not patient:
+            self.render_dashboard_empty_detail()
+            return
+
+        pid, pack_number, name, date_packed, picked_up, due_date, notes, paused, flagged, packed_by, checked_by, needs_entry, pack_size = patient
+        self.dashboard_selected_patient_id = pid
+        self.dashboard_selected_patient_number = str(pack_number)
+        days_text = "—"
+        try:
+            due_src = str(due_date or "").strip()
+            if not due_src and str(picked_up or "").strip():
+                due_src = (datetime.strptime(str(picked_up).strip(), "%d/%m/%Y") + timedelta(days=21)).strftime("%d/%m/%Y")
+            if due_src:
+                days_text = str((datetime.strptime(due_src, "%d/%m/%Y").date() - datetime.today().date()).days)
+        except Exception:
+            pass
+
+        status_visual = self._calendar_status_visual(
+            date_packed=date_packed,
+            picked_up=picked_up,
+            due_date=due_date,
+            paused=paused,
+            flagged=flagged,
+        )
+        status_icons = self._calendar_patient_status_icons(
+            pack_number, name, date_packed, picked_up, due_date, packed_by, checked_by, needs_entry
+        )
+
+        self._clear_dashboard_quick_action_badge_refs()
+        self._clear_dashboard_layout(self.dashboard_detail_layout)
+
+        header = QFrame()
+        header.setObjectName("dashboardPatientHeader")
+        header.setStyleSheet("""
+            QFrame#dashboardPatientHeader {
+                background: #ffffff;
+                border: 1px solid #e7eaf0;
+                border-radius: 8px;
+            }
+            QLabel#detailMetricTitle {
+                color: #475569;
+                font-size: 8pt;
+            }
+            QLabel#detailMetricValue {
+                font-size: 9pt;
+                font-weight: 800;
+            }
+        """)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 12, 0)
+        header_layout.setSpacing(12)
+
+        strip = QFrame()
+        strip.setFixedWidth(6)
+        strip.setStyleSheet(f"background: {status_visual['strip'].name()}; border-radius: 3px;")
+        header_layout.addWidget(strip)
+
+        left = QVBoxLayout()
+        left.setContentsMargins(8, 12, 0, 12)
+        left.setSpacing(8)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        detail_name_label = QLabel(str(name or "").title())
+        detail_name_label.setObjectName("detailPatientName")
+        title_row.addWidget(detail_name_label)
+        title_row.addStretch(1)
+        if status_icons:
+            title_row.addWidget(self._make_calendar_icon_cell(status_icons, icon_size=30, max_icons=3))
+        left.addLayout(title_row)
+
+        meta_row = QHBoxLayout()
+        meta_row.setContentsMargins(0, 0, 0, 0)
+        pack_label = QLabel(f"Pack #{pack_number}")
+        pack_label.setObjectName("detailMeta")
+        meta_row.addWidget(pack_label)
+        if status_visual["label"]:
+            detail_status_badge = QLabel(status_visual["label"])
+            detail_status_badge.setStyleSheet(self._dashboard_status_badge_style(status_visual))
+            meta_row.addWidget(detail_status_badge)
+        meta_row.addStretch(1)
+        left.addLayout(meta_row)
+        header_layout.addLayout(left, 3)
+
+        for metric_label, metric_value_text, metric_color in (
+            ("Date Packed", date_packed or "-", "#111827"),
+            ("Blister Size", pack_size or "16 mm", "#111827"),
+            ("Due Date", due_date or "-", status_visual["fg"]),
+            ("Days Till Due", days_text, status_visual["fg"]),
+        ):
+            metric = QVBoxLayout()
+            metric.setContentsMargins(0, 12, 0, 12)
+            metric.setSpacing(4)
+            metric_title = QLabel(metric_label)
+            metric_title.setObjectName("detailMetricTitle")
+            metric_title.setAlignment(Qt.AlignCenter)
+            metric_value = QLabel(str(metric_value_text))
+            metric_value.setObjectName("detailMetricValue")
+            metric_value.setAlignment(Qt.AlignCenter)
+            metric_value.setStyleSheet(f"color: {metric_color};")
+            metric.addWidget(metric_title)
+            metric.addWidget(metric_value)
+            header_layout.addLayout(metric, 1)
+
+        self.dashboard_detail_layout.addWidget(header)
+
+        dates = QLabel(
+            f"Date Packed: {date_packed or '—'}    Picked Up: {picked_up or '—'}\n"
+            f"Due Date: {due_date or '—'}    Days Till Due: {days_text}"
+        )
+        dates.setObjectName("detailMeta")
+        # Dates are now shown in the compact concept-style patient header above.
+
+        section = QLabel("NOTES")
+        section.setObjectName("detailSectionTitle")
+        self.dashboard_detail_layout.addWidget(section)
+
+        note_entry_row = QHBoxLayout()
+        note_entry_row.setContentsMargins(0, 0, 0, 0)
+        self.dashboard_note_input = QLineEdit()
+        self.dashboard_note_input.setObjectName("dashboardNoteInput")
+        self.dashboard_note_input.setPlaceholderText("Add note...")
+        self.dashboard_note_input.returnPressed.connect(self.add_dashboard_note_to_log)
+        note_entry_row.addWidget(self.dashboard_note_input, 1)
+        save_note_btn = QPushButton("Save")
+        save_note_btn.setObjectName("detailAddNoteButton")
+        save_note_btn.clicked.connect(self.add_dashboard_note_to_log)
+        note_entry_row.addWidget(save_note_btn)
+        self.dashboard_detail_layout.addLayout(note_entry_row)
+
+        self.cur.execute(
+            "SELECT note, timestamp FROM notes_log WHERE patient_id = ? ORDER BY timestamp DESC LIMIT 8",
+            (pid,)
+        )
+        note_rows = self.cur.fetchall()
+        if not note_rows and str(notes or "").strip():
+            note_rows = [(notes, "Current note")]
+
+        if note_rows:
+            for note_text, ts in note_rows:
+                note_label = QLabel(f"{ts}: {note_text}")
+                note_label.setObjectName("detailNote")
+                note_label.setWordWrap(True)
+                self.dashboard_detail_layout.addWidget(note_label)
+        else:
+            empty_notes = QLabel("No notes recorded.")
+            empty_notes.setObjectName("detailMeta")
+            self.dashboard_detail_layout.addWidget(empty_notes)
+
+        actions_card, actions_layout = self._make_dashboard_card()
+        action_title = QLabel("QUICK ACTIONS")
+        action_title.setObjectName("detailSectionTitle")
+        actions_layout.addWidget(action_title)
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        for label, handler in (
+            ("View Patient History", lambda: self.open_patient_tab(self.table.currentRow(), 0)),
+        ):
+            btn = QPushButton(label)
+            btn.setObjectName("quickActionButton")
+            btn.clicked.connect(handler)
+            action_row.addWidget(btn)
+        actions_layout.addLayout(action_row)
+        self.dashboard_detail_layout.addWidget(actions_card)
+        self.dashboard_detail_layout.addStretch(1)
+
+    def add_dashboard_note_to_log(self):
+        if not hasattr(self, "dashboard_note_input") or not hasattr(self, "dashboard_selected_patient_id"):
+            return
+        note_text = self.dashboard_note_input.text().strip()
+        if not note_text:
+            return
+        pid = self.dashboard_selected_patient_id
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.cur.execute(
+            "INSERT INTO notes_log (patient_id, note, timestamp) VALUES (?, ?, ?)",
+            (pid, note_text, now)
+        )
+        self.cur.execute("UPDATE patients SET notes = ? WHERE id = ?", (note_text, pid))
+        self.conn.commit()
+        self.dashboard_note_input.clear()
+        self.load_data(
+            ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+        )
+        self._select_patient_number_in_table(getattr(self, "dashboard_selected_patient_number", ""))
+        self.refresh_calendar_header_counts()
+
+    def _select_patient_number_in_table(self, number):
+        if not number or not hasattr(self, "table"):
+            return
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, self.CAL_COL_NUMBER)
+            if item and item.text().strip() == str(number).strip():
+                self.table.selectRow(row)
+                self.render_dashboard_patient_detail(row)
+                return
 
     def setup_table(self):
-        headers = ["", "#", "$", "Name", "Date Packed", "Picked Up", "Due Date", "Days Till Due", "Notes"]
+        headers = ["", "!", "#", "$", "Name", "Date Packed", "Picked Up", "Due Date", "Days Till Due", "Notes"]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
-        fixed_widths = [28, 30, 30, 300, 150, 150, 150, 150]
+        fixed_widths = [12, 112, 55, 116, 320, 150, 150, 150, 150, 1]
 
         for i, width in enumerate(fixed_widths):
             self.table.setColumnWidth(i, width)
             self.table.horizontalHeader().setSectionResizeMode(i, QHeaderView.Fixed)
 
-        self.table.verticalHeader().setDefaultSectionSize(28)
-        self.table.setIconSize(QSize(20, 20))
+        self.table.horizontalHeader().setSectionResizeMode(self.CAL_COL_NAME, QHeaderView.Stretch)
+        self.table.setColumnHidden(self.CAL_COL_NOTES, True)
+        self.table.setMinimumWidth(sum(fixed_widths[:-1]) + 20)
+        self.table.verticalHeader().setDefaultSectionSize(67)
+        self.notes_table.verticalHeader().setDefaultSectionSize(67)
+        self._update_calendar_table_height()
 
-        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
+        row_font = self.table.font()
+        row_font.setPointSize(row_font.pointSize() + 2)
+        self.table.setFont(row_font)
+        self.notes_table.setFont(row_font)
+
+        self.notes_table.horizontalHeader().setFixedHeight(self.table.horizontalHeader().height())
+        self.notes_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
 
         font = self.table.horizontalHeader().font()
         font.setBold(True)
         self.table.horizontalHeader().setFont(font)
+        self.notes_table.horizontalHeader().setFont(font)
+        name_header_item = self.table.horizontalHeaderItem(self.CAL_COL_NAME)
+        if name_header_item:
+            name_header_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setFocusPolicy(Qt.NoFocus)
+        self.table.setShowGrid(False)
+        self.table.setItemDelegate(CalendarRowDelegate(self.table))
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self._sync_calendar_companions())
+        self.table.setProperty("urgentFlashOn", True)
+        if not hasattr(self, "urgent_flash_timer"):
+            self.urgent_flash_timer = QTimer(self)
+            self.urgent_flash_timer.timeout.connect(self._toggle_urgent_row_flash)
+            self.urgent_flash_timer.start(650)
+
+        self.notes_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.notes_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.notes_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.notes_table.setFocusPolicy(Qt.NoFocus)
+        self.notes_table.setShowGrid(False)
+        self.notes_table.setItemDelegate(CalendarRowDelegate(self.notes_table))
 
         # Do NOT use the animated GIF delegate for column 0 anymore
         # self.table.setItemDelegateForColumn(0, AnimatedGifIconDelegate(self.table, icon_size=24))
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background: white;
+                border: 1px solid #e0e5ee;
+                gridline-color: #e7eaf0;
+                selection-background-color: #dbeafe;
+                selection-color: #111827;
+            }
+            QTableWidget::item {
+                padding: 0px;
+            }
+            QTableWidget::item:selected {
+                background: #dbeafe;
+                color: #111827;
+            }
+            QTableWidget::item:focus {
+                outline: none;
+            }
+            QHeaderView::section {
+                background: #ffffff;
+                border: none;
+                border-bottom: 1px solid #e7eaf0;
+                padding: 0px;
+                font-weight: 800;
+            }
+        """)
+        self.notes_table.setStyleSheet("""
+            QTableWidget {
+                background: white;
+                border: 1px solid #b8b8b8;
+            }
+            QTableWidget::item {
+                padding: 0px;
+            }
+            QTableWidget::item:focus {
+                outline: none;
+            }
+        """)
 
         try:
             self.table.customContextMenuRequested.disconnect()
@@ -7490,6 +8830,624 @@ class WebsterCalendarApp(QMainWindow):
             pass
 
         self.table.customContextMenuRequested.connect(self.open_calendar_row_context_menu)
+        self.table.horizontalHeader().setSortIndicatorShown(False)
+        self.table.horizontalHeader().setSectionsClickable(False)
+
+    def _make_calendar_status_gutter(self, statuses):
+        gutter = QWidget()
+        gutter.setObjectName("calendarStatusGutter")
+        gutter.setStyleSheet("""
+            QWidget#calendarStatusGutter {
+                background: white;
+            }
+            QLabel {
+                background: transparent;
+                padding: 0px;
+                margin: 0px;
+            }
+        """)
+
+        layout = QHBoxLayout(gutter)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        for status in statuses[:2]:
+            icon_path = status.get("path")
+            if not icon_path or not os.path.exists(icon_path):
+                continue
+
+            icon_label = QLabel()
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setFixedSize(30, 30)
+
+            tooltip = status.get("tooltip", "")
+            if tooltip:
+                icon_label.setToolTip(tooltip)
+
+            movie = QMovie(icon_path)
+            movie.setScaledSize(QSize(30, 30))
+            icon_label.setMovie(movie)
+
+            icon_label._movie = movie
+            icon_label._icon_path = icon_path
+            icon_label._patient_number = status.get("number")
+
+            handler = status.get("handler")
+            if handler:
+                icon_label.setCursor(Qt.PointingHandCursor)
+                icon_label.mousePressEvent = handler
+
+            movie.start()
+            layout.addWidget(icon_label)
+
+        return gutter
+
+    def _make_calendar_icon_cell(self, statuses, icon_size=37, max_icons=3, bg_color=None, row_idx=None):
+        cell = QWidget()
+        cell.setObjectName("calendarIconCell")
+        cell._table_row = row_idx
+        cell.setAttribute(Qt.WA_TranslucentBackground, True)
+        cell.setStyleSheet("""
+            QWidget#calendarIconCell {{
+                background: transparent;
+            }}
+            QLabel {{
+                background: transparent;
+                padding: 0px;
+                margin: 0px;
+            }}
+        """)
+
+        layout = QHBoxLayout(cell)
+        layout.setContentsMargins(6, 0, 14, 0)
+        layout.setSpacing(10)
+        layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        left_statuses = [status for status in (statuses or []) if status.get("kind") != "warning"]
+        right_statuses = [status for status in (statuses or []) if status.get("kind") == "warning"]
+
+        def add_icon(status):
+            icon_path = status.get("path")
+            if not icon_path or not os.path.exists(icon_path):
+                return
+
+            icon_label = QLabel()
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_label.setFixedSize(icon_size, icon_size)
+
+            tooltip = status.get("tooltip", "")
+            if tooltip:
+                icon_label.setToolTip(tooltip)
+
+            movie = QMovie(icon_path)
+            movie.setScaledSize(QSize(icon_size, icon_size))
+            icon_label.setMovie(movie)
+
+            icon_label._movie = movie
+            icon_label._icon_path = icon_path
+            icon_label._patient_number = status.get("number")
+
+            handler = status.get("handler")
+            if handler:
+                icon_label.setCursor(Qt.PointingHandCursor)
+                icon_label.mousePressEvent = handler
+
+            movie.start()
+            layout.addWidget(icon_label)
+
+        layout.addStretch(1)
+
+        for status in left_statuses[:max_icons]:
+            add_icon(status)
+
+        for status in right_statuses[:max_icons]:
+            add_icon(status)
+
+        return cell
+
+    def _make_calendar_icon_cell_container(self, statuses, row_color, icon_size=37, max_icons=3, row_idx=None):
+        outer = QWidget()
+        outer.setObjectName("calendarIconCellOuter")
+        outer.setAttribute(Qt.WA_TranslucentBackground, True)
+
+        layout = QVBoxLayout(outer)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(0)
+
+        inner = self._make_calendar_icon_cell(statuses, icon_size=icon_size, max_icons=max_icons, row_idx=row_idx)
+        color = row_color.name() if isinstance(row_color, QColor) else "#ffffff"
+        inner.setStyleSheet(f"""
+            QWidget#calendarIconCell {{
+                background: {color};
+            }}
+            QLabel {{
+                background: transparent;
+                padding: 0px;
+                margin: 0px;
+            }}
+        """)
+        layout.addWidget(inner)
+        return outer
+
+    def _sync_calendar_icon_selection_backgrounds(self):
+        if not hasattr(self, "table"):
+            return
+        for row in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row, self.CAL_COL_ALERT)
+            if widget is None:
+                continue
+
+    def _calendar_status_visual(self, date_packed="", picked_up="", due_date="", paused=False, flagged=False):
+        today = datetime.today().date()
+        start_of_week = today - timedelta(days=today.weekday())
+        end_of_week = start_of_week + timedelta(days=6)
+        next_week_start = start_of_week + timedelta(days=7)
+        next_week_end = start_of_week + timedelta(days=13)
+
+        if paused:
+            return {
+                "label": "PAUSED",
+                "row": QColor(255, 232, 232),
+                "strip": QColor("#FF0000"),
+                "bg": "#ffe8e8",
+                "fg": "#dc2626",
+                "border": "#f2b8b8",
+            }
+        if flagged:
+            return {
+                "label": "CHANGES",
+                "row": QColor(255, 228, 234),
+                "strip": QColor("#FFB6C1"),
+                "bg": "#ffe4ea",
+                "fg": "#be123c",
+                "border": "#f9a8b8",
+            }
+        if str(date_packed or "").strip() and not str(picked_up or "").strip():
+            return {
+                "label": "PACKED",
+                "row": QColor(222, 247, 232),
+                "strip": QColor("#00FF00"),
+                "bg": "#def7e8",
+                "fg": "#059669",
+                "border": "#a7e8c2",
+            }
+
+        due_dt = None
+        try:
+            due_src = str(due_date or "").strip()
+            if due_src:
+                due_dt = datetime.strptime(due_src, "%d/%m/%Y").date()
+            elif str(picked_up or "").strip():
+                due_dt = datetime.strptime(str(picked_up).strip(), "%d/%m/%Y").date() + timedelta(days=21)
+        except Exception:
+            due_dt = None
+
+        if due_dt and start_of_week <= due_dt <= end_of_week:
+            return {
+                "label": "DUE THIS WEEK",
+                "row": QColor(255, 253, 198),
+                "strip": QColor("#FFFF00"),
+                "bg": "#fffdd0",
+                "fg": "#b45309",
+                "border": "#f3df8b",
+            }
+        if due_dt and next_week_start <= due_dt <= next_week_end:
+            return {
+                "label": "DUE NEXT WEEK",
+                "row": QColor(227, 205, 255),
+                "strip": QColor("#B58AE3"),
+                "bg": "#e3cdff",
+                "fg": "#5b2dd6",
+                "border": "#c8a8ff",
+            }
+
+        return {
+            "label": "",
+            "row": QColor(248, 250, 252),
+            "strip": QColor("#94A3B8"),
+            "bg": "#f8fafc",
+            "fg": "#64748b",
+            "border": "#cbd5e1",
+        }
+
+    def _dashboard_status_badge_style(self, status):
+        return (
+            f"background: {status['bg']}; color: {status['fg']}; border: 1px solid {status['border']}; "
+            "border-radius: 5px; padding: 4px 8px; font-weight: 800;"
+        )
+
+    def _calendar_patient_status_icons(self, number, name, date_packed, picked_up, due_date, packed_by, checked_by, needs_entry):
+        icons = []
+        packed_str = str(packed_by or "").strip()
+        checked_str = str(checked_by or "").strip()
+        needs_entry = int(needs_entry or 0)
+
+        if needs_entry:
+            icons.append({
+                "kind": "status",
+                "path": resource_path(os.path.join("icons", "needs_entering.gif")),
+                "tooltip": "Needs pack entry",
+                "number": number,
+                "handler": lambda event, n=number: self.handle_new_packed_action(patient_number=n),
+            })
+
+        if (needs_entry and not checked_str) or (packed_str and not checked_str and not needs_entry):
+            icons.append({
+                "kind": "status",
+                "path": resource_path(os.path.join("icons", "needs_checking.gif")),
+                "tooltip": "Packed but not checked",
+                "number": number,
+                "handler": lambda event, n=number: self.handle_checked_action(preselect_number=n),
+            })
+
+        try:
+            if date_packed and not str(picked_up or "").strip():
+                packed_date = datetime.strptime(str(date_packed).strip(), "%d/%m/%Y")
+                if (datetime.today() - packed_date).days > 30:
+                    icons.append({
+                        "kind": "warning",
+                        "path": resource_path(os.path.join("icons", "warning_icon.gif")),
+                        "tooltip": "Pack not collected",
+                        "number": number,
+                        "handler": lambda event, patient=name: self.show_daacal_notification(
+                            "Pack not collected",
+                            f"{str(patient).title()}"
+                        ),
+                    })
+        except Exception:
+            pass
+
+        try:
+            due_src = str(due_date or "").strip()
+            if not due_src and str(picked_up or "").strip():
+                due_src = (datetime.strptime(str(picked_up).strip(), "%d/%m/%Y") + timedelta(days=21)).strftime("%d/%m/%Y")
+            if due_src and datetime.strptime(due_src, "%d/%m/%Y").date() < datetime.today().date():
+                icons.append({
+                    "kind": "warning",
+                    "path": resource_path(os.path.join("icons", "warning_icon.gif")),
+                    "tooltip": "Pack overdue",
+                    "number": number,
+                    "handler": lambda event, patient=name: self.show_daacal_notification(
+                        "Pack overdue",
+                        f"{str(patient).title()}"
+                    ),
+                })
+        except Exception:
+            pass
+
+        return icons
+
+    def _set_status_gutter_row(self, row_idx, statuses):
+        if not hasattr(self, "_status_rows"):
+            return
+        self._status_rows[row_idx] = statuses or []
+
+    def _clear_status_gutter_widgets(self):
+        if not hasattr(self, "_status_row_widgets"):
+            return
+
+        for widget in self._status_row_widgets:
+            widget.setParent(None)
+            widget.deleteLater()
+        self._status_row_widgets.clear()
+
+    def _refresh_status_gutter_from_main(self):
+        if not hasattr(self, "table"):
+            return
+        if not hasattr(self, "status_gutter"):
+            return
+
+        self._status_rows = {}
+        for row_idx in range(self.table.rowCount()):
+            item = self.table.item(row_idx, 0)
+            self._status_rows[row_idx] = item.data(Qt.UserRole) if item else []
+
+        self._refresh_status_gutter()
+
+    def _refresh_notes_table_from_main(self):
+        if not hasattr(self, "notes_table") or not hasattr(self, "table"):
+            return
+
+            self.notes_table.blockSignals(True)
+        try:
+            self.notes_table.setRowCount(self.table.rowCount())
+            for row_idx in range(self.table.rowCount()):
+                note_src = self.table.item(row_idx, self.CAL_COL_NOTES)
+                note_item = QTableWidgetItem(note_src.text() if note_src else "")
+                note_item.setFlags(note_item.flags() & ~Qt.ItemIsEditable)
+                note_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                if note_src:
+                    note_item.setBackground(note_src.background())
+                    note_item.setForeground(note_src.foreground())
+                self.notes_table.setItem(row_idx, 0, note_item)
+                self.notes_table.setRowHeight(row_idx, self.table.rowHeight(row_idx))
+        finally:
+            self.notes_table.blockSignals(False)
+
+        self._sync_notes_scroll_from_main()
+        self._sync_notes_selection()
+
+    def _refresh_calendar_companions_from_main(self):
+        self._refresh_notes_table_from_main()
+
+    def _sync_notes_scroll_from_main(self, *_):
+        if not hasattr(self, "notes_table") or not hasattr(self, "table"):
+            return
+        self.notes_table.verticalScrollBar().setValue(self.table.verticalScrollBar().value())
+
+    def _sync_notes_selection(self):
+        if not hasattr(self, "notes_table") or not hasattr(self, "table"):
+            return
+
+        row = self.table.currentRow()
+        self.notes_table.blockSignals(True)
+        try:
+            if row >= 0 and self.table.selectionModel().isRowSelected(row):
+                self.notes_table.selectRow(row)
+            else:
+                self.notes_table.clearSelection()
+                self.notes_table.setCurrentCell(-1, -1)
+        finally:
+            self.notes_table.blockSignals(False)
+
+    def _sync_calendar_companions(self):
+        self._sync_notes_selection()
+        self._sync_calendar_icon_selection_backgrounds()
+
+    def _refresh_status_gutter(self):
+        if not hasattr(self, "status_gutter") or not hasattr(self, "table"):
+            return
+
+        self._clear_status_gutter_widgets()
+        gutter_width = self.status_gutter.width() or 110
+        viewport_height = self.table.viewport().height()
+
+        for row_idx in range(self.table.rowCount()):
+            y = self.table.rowViewportPosition(row_idx)
+            row_height = self.table.rowHeight(row_idx)
+            if y + row_height < 0 or y > viewport_height:
+                continue
+
+            row_widget = self._make_calendar_status_gutter(self._status_rows.get(row_idx, []))
+            row_widget.setParent(self.status_gutter)
+            row_widget.setGeometry(0, y, gutter_width, row_height)
+            row_widget.mousePressEvent = lambda event, r=row_idx: self.status_table_mouse_click(r, 0)
+            row_widget.show()
+            self._status_row_widgets.append(row_widget)
+
+    def set_calendar_filter(self, filter_key):
+        self.active_calendar_filter = filter_key or "all"
+        self.current_page = 1
+        self._sync_calendar_filter_buttons()
+        self.load_data(
+            ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+        )
+
+    def on_calendar_search_changed(self):
+        self.current_page = 1
+        self.load_data(
+            ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+        )
+
+    def set_calendar_page(self, page):
+        total_pages = max(1, getattr(self, "_calendar_total_pages", 1))
+        self.current_page = max(1, min(int(page or 1), total_pages))
+        self.load_data(
+            ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+        )
+
+    def _sync_calendar_filter_buttons(self):
+        if not hasattr(self, "calendar_filter_buttons"):
+            return
+        active = getattr(self, "active_calendar_filter", "all")
+        for key, button in self.calendar_filter_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(key == active)
+            button.blockSignals(False)
+
+    def _calendar_row_warning(self, row):
+        date_packed, picked_up, due_date, flagged = row[4], row[5], row[6], row[10]
+        if flagged:
+            return True
+
+        today = datetime.today().date()
+        try:
+            due_src = str(due_date or "").strip()
+            if not due_src and str(picked_up or "").strip():
+                due_src = (datetime.strptime(str(picked_up).strip(), "%d/%m/%Y") + timedelta(days=21)).strftime("%d/%m/%Y")
+            if due_src and datetime.strptime(due_src, "%d/%m/%Y").date() < today:
+                return True
+        except Exception:
+            pass
+
+        try:
+            if date_packed and not str(picked_up or "").strip():
+                packed_date = datetime.strptime(str(date_packed).strip(), "%d/%m/%Y").date()
+                if (today - packed_date).days > 30:
+                    return True
+        except Exception:
+            pass
+
+        return False
+
+    def _calendar_row_matches_filter(self, row, filter_key):
+        if filter_key == "all":
+            return True
+
+        paused = bool(row[9])
+        packed_by = str(row[11] or "").strip()
+        checked_by = str(row[12] or "").strip()
+        needs_entry = int(row[13] or 0)
+        date_packed = str(row[4] or "").strip()
+        picked_up = str(row[5] or "").strip()
+        due_date = self._calendar_effective_due_date(row)
+        today = datetime.today().date()
+        start_of_week = today - timedelta(days=today.weekday())
+        end_of_week = start_of_week + timedelta(days=6)
+        next_week_start = start_of_week + timedelta(days=7)
+        next_week_end = start_of_week + timedelta(days=13)
+
+        if filter_key == "due_today":
+            return due_date == today
+        if filter_key == "due_this_week":
+            return bool(due_date and start_of_week <= due_date <= end_of_week)
+        if filter_key == "due_next_week":
+            return bool(due_date and next_week_start <= due_date <= next_week_end)
+        if filter_key == "needs_checking":
+            return (needs_entry and not checked_by) or (bool(packed_by) and not checked_by and not needs_entry)
+        if filter_key == "to_be_entered":
+            return bool(needs_entry)
+        if filter_key == "ready_for_collection":
+            return bool(date_packed) and not picked_up
+        if filter_key == "changes":
+            return bool(row[10])
+        if filter_key == "paused":
+            return paused
+        if filter_key == "warnings":
+            return self._calendar_row_warning(row)
+
+        return True
+
+    def _calendar_effective_due_date(self, row):
+        due_src = str(row[6] or "").strip()
+        picked_src = str(row[5] or "").strip()
+        try:
+            if due_src:
+                return datetime.strptime(due_src, "%d/%m/%Y").date()
+            if picked_src:
+                return datetime.strptime(picked_src, "%d/%m/%Y").date() + timedelta(days=21)
+        except Exception:
+            return None
+        return None
+
+    def _calendar_row_matches_search(self, row, search_text):
+        needle = str(search_text or "").strip().lower()
+        if not needle:
+            return True
+
+        haystack = " ".join(str(row[i] or "") for i in (1, 3, 4, 5, 6, 8)).lower()
+        return needle in haystack
+
+    def _refresh_calendar_filter_labels(self, rows):
+        if not hasattr(self, "calendar_filter_buttons"):
+            return
+
+        labels = {
+            "all": "All",
+            "due_today": "Due Today",
+            "due_this_week": "Due This Week",
+            "due_next_week": "Due Next Week",
+            "needs_checking": "Needs Checking",
+            "ready_for_collection": "Ready For Collection",
+            "changes": "Changes",
+            "paused": "Paused",
+        }
+        for key, label in labels.items():
+            button = self.calendar_filter_buttons.get(key)
+            if not button:
+                continue
+            if key == "all":
+                button.setText(label)
+            else:
+                count = sum(1 for row in rows if self._calendar_row_matches_filter(row, key))
+                button.setText(f"{label} ({count})")
+
+    def _apply_calendar_filters(self, rows):
+        self._refresh_calendar_filter_labels(rows)
+        active_filter = getattr(self, "active_calendar_filter", "all")
+        search_text = self.search_input.text() if hasattr(self, "search_input") else ""
+        return [
+            row for row in rows
+            if self._calendar_row_matches_filter(row, active_filter)
+            and self._calendar_row_matches_search(row, search_text)
+        ]
+
+    def _sort_calendar_rows(self, rows):
+        sort_mode = getattr(self, "calendar_sort_mode", "default")
+
+        def default_sort_key(r):
+            packed_by = str(r[11] or '').strip()
+            checked_by = str(r[12] or '').strip()
+            needs_entry = int(r[13] or 0)
+
+            if needs_entry:
+                return (-2, -1)
+
+            has_unchecked_icon = bool(packed_by) and not checked_by
+            if has_unchecked_icon:
+                return (-1, -1)
+
+            if r[9]:
+                return (99999, float('-inf'))
+
+            if r[10]:
+                return (99998, float('-inf'))
+
+            try:
+                packed_ts = -datetime.strptime(r[4], "%d/%m/%Y").timestamp() if r[4] else float('-inf')
+            except Exception:
+                packed_ts = float('-inf')
+
+            day_key = r[7] if isinstance(r[7], int) else 9999
+            return (day_key, packed_ts)
+
+        if sort_mode == "name":
+            rows.sort(key=lambda r: str(r[3] or "").lower())
+        elif sort_mode == "number":
+            rows.sort(key=lambda r: int(r[1]) if str(r[1] or "").isdigit() else 999999)
+        elif sort_mode == "days":
+            rows.sort(key=lambda r: r[7] if isinstance(r[7], int) else 9999)
+        elif sort_mode == "charge":
+            rows.sort(key=lambda r: (0 if str(r[2] or "").strip().upper() == "Y" else 1, str(r[3] or "").lower()))
+        else:
+            rows.sort(key=default_sort_key)
+        return rows
+
+    def _paginate_calendar_rows(self, rows):
+        total = len(rows)
+        rows_per_page = max(1, int(getattr(self, "rows_per_page", 15)))
+        total_pages = max(1, (total + rows_per_page - 1) // rows_per_page)
+        self._calendar_total_pages = total_pages
+        self.current_page = max(1, min(int(getattr(self, "current_page", 1)), total_pages))
+        start = (self.current_page - 1) * rows_per_page
+        end = start + rows_per_page
+        self._calendar_total_rows = total
+        self._calendar_page_start = start
+        self._calendar_page_end = min(end, total)
+        return rows[start:end]
+
+    def _update_pagination_footer(self):
+        if not hasattr(self, "pagination_summary_label"):
+            return
+
+        total = getattr(self, "_calendar_total_rows", 0)
+        start = getattr(self, "_calendar_page_start", 0)
+        end = getattr(self, "_calendar_page_end", 0)
+        if total:
+            self.pagination_summary_label.setText(f"Showing {start + 1}-{end} of {total}")
+        else:
+            self.pagination_summary_label.setText("Showing 0-0 of 0")
+
+        total_pages = max(1, getattr(self, "_calendar_total_pages", 1))
+        self.prev_page_button.setEnabled(self.current_page > 1)
+        self.next_page_button.setEnabled(self.current_page < total_pages)
+
+        while self.pagination_page_buttons_layout.count():
+            item = self.pagination_page_buttons_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        for page in range(1, total_pages + 1):
+            if total_pages > 5 and page not in {1, total_pages, self.current_page - 1, self.current_page, self.current_page + 1}:
+                continue
+            btn = self._make_pagination_button(str(page))
+            btn.setCheckable(True)
+            btn.setChecked(page == self.current_page)
+            btn.clicked.connect(lambda checked=False, p=page: self.set_calendar_page(p))
+            self.pagination_page_buttons_layout.addWidget(btn)
 
 
     def load_data(self, ceased=False):
@@ -7526,34 +9484,15 @@ class WebsterCalendarApp(QMainWindow):
                 else:
                     rows[i][7] = None
 
-            # --- Sort: priority to 'packed but unchecked', then paused/flagged, else by days_till_due then recency of packed ---
-            def sort_key_override(r):
-                packed_by = str(r[11] or '').strip()
-                checked_by = str(r[12] or '').strip()
-                needs_entry = int(r[13] or 0)
-
-                if needs_entry:
-                    return (-2, -1)
-
-                has_unchecked_icon = bool(packed_by) and not checked_by
-                if has_unchecked_icon:
-                    return (-1, -1)
-
-                if r[9]:  # paused
-                    return (99999, float('-inf'))
-
-                if r[10]:  # flagged
-                    return (99998, float('-inf'))
-
-                try:
-                    packed_ts = -datetime.strptime(r[4], "%d/%m/%Y").timestamp() if r[4] else float('-inf')
-                except Exception:
-                    packed_ts = float('-inf')
-
-                day_key = r[7] if isinstance(r[7], int) else 9999
-                return (day_key, packed_ts)
-            rows.sort(key=sort_key_override)
+            self._sort_calendar_rows(rows)
+            if ceased:
+                self._refresh_calendar_filter_labels(rows)
+            else:
+                rows = self._apply_calendar_filters(rows)
+            rows = self._paginate_calendar_rows(rows)
             self.table.setRowCount(len(rows))
+            if hasattr(self, "_status_rows"):
+                self._status_rows.clear()
 
             # --- Week windows for colouring ---
             today_dt = datetime.today()
@@ -7565,10 +9504,9 @@ class WebsterCalendarApp(QMainWindow):
             for row_idx, row in enumerate(rows):
                 pid, number, charge, name, date_packed, picked_up, due_date, _, notes, paused, flagged, packed_by, checked_by, needs_entry = row
                 # Initialise display vars
-                warning_icon = ""
+                status_icons = []
                 due_date_str = ""
                 days_text = ""
-                warning_tooltip = ""
 
                 # Unchecked indicator
                 packed_str = (packed_by or "").strip()
@@ -7576,40 +9514,58 @@ class WebsterCalendarApp(QMainWindow):
                 needs_entry = int(needs_entry or 0)
 
                 if needs_entry:
-                    warning_icon = resource_path(os.path.join("icons", "needs_entering.gif"))
-                    warning_tooltip = "Needs pack entry"
-                elif packed_str and not checked_str:
-                    warning_icon = resource_path(os.path.join("icons", "needs_checking.gif"))
-                    warning_tooltip = "Packed but not checked"
-                else:
-                    warning_icon = None
-                    warning_tooltip = ""
+                    status_icons.append({
+                        "kind": "status",
+                        "path": resource_path(os.path.join("icons", "needs_entering.gif")),
+                        "tooltip": "Needs pack entry",
+                        "number": number,
+                        "handler": lambda event, n=number: self.handle_new_packed_action(patient_number=n),
+                    })
+
+                if (needs_entry and not checked_str) or (packed_str and not checked_str and not needs_entry):
+                    status_icons.append({
+                        "kind": "status",
+                        "path": resource_path(os.path.join("icons", "needs_checking.gif")),
+                        "tooltip": "Packed but not checked",
+                        "number": number,
+                        "handler": lambda event, n=number: self.handle_checked_action(preselect_number=n),
+                    })
+                urgent_collected_with_open_work = bool(str(picked_up or "").strip()) and any(
+                    icon.get("kind") == "status" for icon in status_icons
+                )
 
                 # --- Row colour logic ---
                 row_color = QColor(255, 255, 255)  # default white
                 try:
                     if paused:
-                        row_color = QColor(255, 0, 0)  # red
+                        row_color = QColor(255, 232, 232)
                     elif flagged:
-                        row_color = QColor(255, 192, 203)  # pink
+                        row_color = QColor(255, 228, 234)
                     elif (due_date and str(due_date).strip()) or (picked_up and picked_up.strip()):
                         base_due_str = str(due_date).strip() if (due_date and str(due_date).strip()) \
                             else (datetime.strptime(picked_up.strip(), "%d/%m/%Y") + timedelta(days=21)).strftime(
                             "%d/%m/%Y")
                         due_dt = datetime.strptime(base_due_str, "%d/%m/%Y")
                         if start_of_week.date() <= due_dt.date() <= end_of_week.date():
-                            row_color = QColor(255, 255, 0)  # yellow = this week
+                            row_color = QColor(255, 253, 198)
                         elif next_week_start.date() <= due_dt.date() <= next_week_end.date():
-                            row_color = QColor(204, 153, 255)  # purple = next week
+                            row_color = QColor(227, 205, 255)
                     elif date_packed and not picked_up:
                         # Green for packed & uncollected
-                        row_color = QColor(0, 255, 0)
+                        row_color = QColor(222, 247, 232)
                         try:
                             dp = datetime.strptime(date_packed.strip(), "%d/%m/%Y")
                             if (datetime.today() - dp).days > 30:
-                                if not warning_icon:
-                                    warning_icon = resource_path(os.path.join("icons", "warning_icon.gif"))
-                                    warning_tooltip = "Pack not collected"
+                                status_icons.append({
+                                    "kind": "warning",
+                                    "path": resource_path(os.path.join("icons", "warning_icon.gif")),
+                                    "tooltip": "Pack not collected",
+                                    "number": number,
+                                    "handler": lambda event, patient=name: self.show_daacal_notification(
+                                        "Pack not collected",
+                                        f"{str(patient).title()}"
+                                    ),
+                                })
                         except Exception:
                             pass
                 except Exception as e:
@@ -7627,9 +9583,16 @@ class WebsterCalendarApp(QMainWindow):
                         days_text = str(delta_days)
                         try:
                             if int(delta_days) < 0:
-                                if not warning_icon:
-                                    warning_icon = resource_path(os.path.join("icons", "warning_icon.gif"))
-                                    warning_tooltip = "Pack overdue"
+                                status_icons.append({
+                                    "kind": "warning",
+                                    "path": resource_path(os.path.join("icons", "warning_icon.gif")),
+                                    "tooltip": "Pack overdue",
+                                    "number": number,
+                                    "handler": lambda event, patient=name: self.show_daacal_notification(
+                                        "Pack overdue",
+                                        f"{str(patient).title()}"
+                                    ),
+                                })
                         except Exception:
                             pass
                     elif date_packed and not picked_up:
@@ -7647,94 +9610,95 @@ class WebsterCalendarApp(QMainWindow):
                 elif flagged:
                     days_text = "FLAGGED"
 
+                display_dash = "—"
+                date_packed_display = date_packed if str(date_packed or "").strip() else display_dash
+                picked_up_display = picked_up if str(picked_up or "").strip() else display_dash
+                due_date_display = due_date_str if str(due_date_str or "").strip() else display_dash
+                days_display = days_text if str(days_text or "").strip() else display_dash
+                status_visual = self._calendar_status_visual(
+                    date_packed=date_packed,
+                    picked_up=picked_up,
+                    due_date=due_date_display if due_date_display != display_dash else due_date,
+                    paused=paused,
+                    flagged=flagged,
+                )
+                cell_color = status_visual["row"]
+                strip_color = status_visual["row"]
+                strip_color = status_visual["strip"]
+
                 # --- Populate table cells ---
-                values = [warning_icon, number, charge, name, date_packed, picked_up, due_date_str, days_text, notes]
+                values = [
+                    strip_color,
+                    status_icons,
+                    number,
+                    charge,
+                    name,
+                    date_packed_display,
+                    picked_up_display,
+                    due_date_display,
+                    days_display,
+                    notes
+                ]
 
                 for col_idx, value in enumerate(values):
 
-                    # Column 0 = warning/status animated SVG
-                    # Column 0 = warning/status animated GIF
-                    if col_idx == 0:
-                        self.table.setItem(row_idx, col_idx, QTableWidgetItem(""))
-
-                        if value and isinstance(value, str) and os.path.exists(value):
-                            icon_label = QLabel()
-                            icon_label.setAlignment(Qt.AlignCenter)
-                            icon_label.setStyleSheet("background: transparent; padding: 0px; margin: 0px;")
-                            if warning_tooltip:
-                                icon_label.setToolTip(warning_tooltip)
-
-                            movie = QMovie(value)
-                            movie.setScaledSize(QSize(20, 20))
-                            icon_label.setMovie(movie)
-
-                            # Keep reference so GIF does not get garbage collected
-                            icon_label._movie = movie
-                            icon_label._icon_path = value
-                            icon_label._patient_number = number
-
-                            icon_name = os.path.basename(value).lower()
-
-                            if icon_name == "needs_checking.gif":
-                                icon_label.setCursor(Qt.PointingHandCursor)
-                                icon_label.mousePressEvent = lambda event, n=number: self.handle_checked_action(
-                                    preselect_number=n)
-
-                            elif icon_name == "needs_entering.gif":
-                                icon_label.setCursor(Qt.PointingHandCursor)
-                                icon_label.mousePressEvent = lambda event, n=number: self.handle_new_packed_action(
-                                    patient_number=n)
-
-                            elif icon_name == "warning_icon.gif" and warning_tooltip in ("Pack overdue",
-                                                                                         "Pack not collected"):
-                                icon_label.setCursor(Qt.PointingHandCursor)
-                                icon_label.mousePressEvent = lambda event, patient=name, reason=warning_tooltip: (
-                                    self.show_daacal_notification(
-                                        reason,
-                                        f"{str(patient).title()}"
-                                    )
-                                )
-
-                            movie.start()
-
-                            self.table.setCellWidget(row_idx, col_idx, icon_label)
-                        else:
-                            self.table.setCellWidget(row_idx, col_idx, None)
-
+                    if col_idx == self.CAL_COL_STRIP:
+                        item = QTableWidgetItem("")
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                        item.setData(Qt.UserRole, value if isinstance(value, QColor) else QColor("#94A3B8"))
+                        item.setData(Qt.UserRole + 1, cell_color)
+                        item.setData(Qt.UserRole + 2, urgent_collected_with_open_work)
+                        self.table.setItem(row_idx, col_idx, item)
                         continue
 
-                    elif col_idx == 1:
+                    if col_idx == self.CAL_COL_ALERT:
+                        item = QTableWidgetItem("")
+                        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                        item.setData(Qt.UserRole + 1, cell_color)
+                        item.setData(Qt.UserRole + 2, urgent_collected_with_open_work)
+                        self.table.setItem(row_idx, col_idx, item)
+                        if value:
+                            self.table.setCellWidget(
+                                row_idx,
+                                col_idx,
+                                self._make_calendar_icon_cell_container(value, cell_color, row_idx=row_idx)
+                            )
+                        continue
+
+                    elif col_idx == self.CAL_COL_NUMBER:
                         item = NumericItem("" if not value else str(value))
 
-                    elif col_idx == 3:
+                    elif col_idx == self.CAL_COL_NAME:
                         raw_name = str(value or "")
                         item = QTableWidgetItem(raw_name.title())
 
-                    elif col_idx == 2:
+                    elif col_idx == self.CAL_COL_CHARGE:
                         item = QTableWidgetItem("" if not value else str(value))
 
-                    elif col_idx == 7:
+                    elif col_idx == self.CAL_COL_DAYS:
                         item = NumericItem("" if not value else str(value))
 
-                    elif col_idx == 4:
+                    elif col_idx == self.CAL_COL_DATE_PACKED:
                         item = DateItem("" if not value else str(value))
 
                     else:
                         item = QTableWidgetItem("" if not value else str(value))
 
                     # Notes column
-                    if col_idx == 8:
+                    if col_idx == self.CAL_COL_NOTES:
                         note_text = f"   {value}" if value else ""
                         item.setText(note_text)
+                        item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    elif col_idx == self.CAL_COL_NAME:
                         item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                     else:
                         item.setTextAlignment(Qt.AlignCenter)
 
-                    if col_idx != 0:
-                        item.setBackground(row_color)
+                    item.setData(Qt.UserRole + 1, cell_color)
+                    item.setData(Qt.UserRole + 2, urgent_collected_with_open_work)
 
                     # Charge column ($)
-                    if col_idx == 2:
+                    if col_idx == self.CAL_COL_CHARGE:
                         if str(value).strip().upper() == 'Y':
                             item.setText('$')
                             item.setForeground(
@@ -7742,6 +9706,9 @@ class WebsterCalendarApp(QMainWindow):
                             )
                         else:
                             item.setText('')
+
+                    if col_idx in (self.CAL_COL_DUE_DATE, self.CAL_COL_DAYS):
+                        item.setForeground(QBrush(QColor(status_visual["fg"])))
 
                     self.table.setItem(row_idx, col_idx, item)
 
@@ -7751,14 +9718,18 @@ class WebsterCalendarApp(QMainWindow):
                 log.write(f"Error in load_data: {e}\n")
             self.show_daacal_notification( "Load Error", f"Failed to load data:\n{e}")
 
-        self.table.setSortingEnabled(True)
+        self.table.setSortingEnabled(False)
+        self._refresh_calendar_companions_from_main()
+        self._update_calendar_table_height()
+        self._update_pagination_footer()
+        self.refresh_calendar_header_counts()
 
     def toggle_pause(self):
         if not self.enforce_login(): return
         selected = self.table.currentRow()
         if selected < 0:
             return
-        number_item = self.table.item(selected, 1)
+        number_item = self.table.item(selected, self.CAL_COL_NUMBER)
         if not number_item:
             return
         number = number_item.text()
@@ -7785,7 +9756,7 @@ class WebsterCalendarApp(QMainWindow):
         selected = self.table.currentRow()
         if selected < 0:
             return
-        number_item = self.table.item(selected, 1)
+        number_item = self.table.item(selected, self.CAL_COL_NUMBER)
         if not number_item:
             return
         number = number_item.text()
@@ -7809,22 +9780,10 @@ class WebsterCalendarApp(QMainWindow):
 
     def load_ceased_data(self):
         showing_ceased = self.view_ceased_action.isChecked()
-        # Rebuild top button contents only
-        while self.top_buttons.count():
-            item = self.top_buttons.takeAt(0)
-            if item.widget(): item.widget().setParent(None)
-        if showing_ceased:
-            self.top_buttons.addWidget(self.delete_button)
-            self.top_buttons.addWidget(self.restore_button)
-            self.top_buttons.addWidget(self.login_input)
-        else:
-            self.top_buttons.addWidget(self.print_button)
-            self.top_buttons.addWidget(self.new_packed_button)
-            self.top_buttons.addWidget(self.checked_button)
-            self.top_buttons.addWidget(self.collected_button)
-            self.top_buttons.addWidget(self.flag_button)
-            self.top_buttons.addWidget(self.pause_button)
-            self.top_buttons.addWidget(self.login_input)
+        if hasattr(self, "workflow_body_layout") and hasattr(self, "print_body_layout"):
+            self._populate_calendar_header_actions(showing_ceased=showing_ceased)
+        if hasattr(self, "calendar_filter_bar"):
+            self.calendar_filter_bar.setVisible(not showing_ceased)
         self.load_data(ceased=showing_ceased)
 
     def _update_date_field_style(self, field):
@@ -7846,8 +9805,8 @@ class WebsterCalendarApp(QMainWindow):
 
     def open_patient_tab(self, row, col):
         if not self.enforce_login(): return
-        number_item = self.table.item(row, 1)
-        name_item = self.table.item(row, 3)
+        number_item = self.table.item(row, self.CAL_COL_NUMBER)
+        name_item = self.table.item(row, self.CAL_COL_NAME)
         if not number_item or not name_item:
             return
         number = number_item.text().strip()
@@ -7858,14 +9817,14 @@ class WebsterCalendarApp(QMainWindow):
                 self.tabs.setCurrentIndex(i)
                 return
 
-        number = self.table.item(row, 1).text()
-        name_to_open = self.table.item(row, 3).text().strip()
+        number = self.table.item(row, self.CAL_COL_NUMBER).text()
+        name_to_open = self.table.item(row, self.CAL_COL_NAME).text().strip()
         for i in range(self.tabs.count()):
             existing_tab = self.tabs.widget(i)
             if existing_tab.property("patient_number") == number:
                 self.tabs.setCurrentIndex(i)
                 return
-        number = self.table.item(row, 1).text()
+        number = self.table.item(row, self.CAL_COL_NUMBER).text()
         self.current_patient_number = number
         self.cur.execute("""
                          SELECT name,
@@ -7892,6 +9851,7 @@ class WebsterCalendarApp(QMainWindow):
                 self.weeks_per_blister_dropdown.setCurrentText(weeks_val)
                 print("DEBUG: Set weeks dropdown to", self.weeks_per_blister_dropdown.currentText())
             else:
+                self.weeks_per_blister_dropdown.setCurrentText("1 week")
                 print("DEBUG: Invalid or missing weeks_val:", repr(weeks_val))
         except Exception as e:
             print("DEBUG: Exception setting weeks dropdown:", e)
@@ -7917,9 +9877,12 @@ class WebsterCalendarApp(QMainWindow):
         grid.addWidget(self.first_name_input, 0, 1)
         grid.addWidget(QLabel("Blister Size:"), 0, 2)
         self.pack_size_dropdown = QComboBox()
-        self.pack_size_dropdown.addItems(["Small", "Large"])
-        if pack_size in ["Small", "Large"]:
-            self.pack_size_dropdown.setCurrentText(pack_size)
+        blister_size_options = ["8 mm", "12 mm", "16 mm", "20 mm", "24 mm"]
+        self.pack_size_dropdown.addItems(blister_size_options)
+        pack_size_display = str(pack_size or "").strip()
+        if pack_size_display not in blister_size_options:
+            pack_size_display = "16 mm"
+        self.pack_size_dropdown.setCurrentText(pack_size_display)
         grid.addWidget(self.pack_size_dropdown, 0, 3)
         grid.addWidget(QLabel("Last Name:"), 1, 0)
         self.last_name_input = QLineEdit()
@@ -8764,10 +10727,11 @@ class WebsterCalendarApp(QMainWindow):
     def handle_warning_click(self, row, col):
         if not self.enforce_login(): return
         item = self.table.item(row, col)
-        if col == 0 and self.table.cellWidget(row, col) is not None:
-            name_item = self.table.item(row, 3)
+        if col == self.CAL_COL_ALERT and self.table.cellWidget(row, col) is not None:
+            name_item = self.table.item(row, self.CAL_COL_NAME)
             if name_item:
-                due_val = self.table.item(row, 7).text()
+                due_item = self.table.item(row, self.CAL_COL_DAYS)
+                due_val = due_item.text() if due_item else ""
                 reason = "Pack overdue" if due_val.startswith("-") else "Pack not collected"
                 self.show_warning_popup(name_item.text(), reason)
 
@@ -8787,12 +10751,12 @@ class WebsterCalendarApp(QMainWindow):
         selected = self.table.currentRow()
         if selected < 0:
             self.pause_button.setText("Pause")
-            self.pause_button.setStyleSheet("")
+            self._style_dashboard_button(self.pause_button, "danger")
             self.flag_button.setText("Changes")
-            self.flag_button.setStyleSheet("")
+            self._style_dashboard_button(self.flag_button, "changes")
             return
 
-        number_item = self.table.item(selected, 1)
+        number_item = self.table.item(selected, self.CAL_COL_NUMBER)
         if number_item:
             number = number_item.text()
             self.cur.execute("SELECT paused, flagged FROM patients WHERE number = ?", (number,))
@@ -8801,28 +10765,37 @@ class WebsterCalendarApp(QMainWindow):
                 paused, flagged = result
                 if paused:
                     self.pause_button.setText("Paused")
-                    self.pause_button.setStyleSheet("background-color: red; color: white;")
+                    self._style_dashboard_button(self.pause_button, "danger")
                 else:
                     self.pause_button.setText("Pause")
-                    self.pause_button.setStyleSheet("")
+                    self._style_dashboard_button(self.pause_button, "danger")
                 if flagged:
                     self.flag_button.setText("Flagged")
-                    self.flag_button.setStyleSheet("background-color: pink; color: black;")
+                    self._style_dashboard_button(self.flag_button, "changes")
                 else:
                     self.flag_button.setText("Changes")
-                    self.flag_button.setStyleSheet("")
+                    self._style_dashboard_button(self.flag_button, "changes")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.table.clearSelection()
             self.update_button_states()
+            self.render_dashboard_empty_detail()
+
+    def select_calendar_patient(self, row):
+        self.render_dashboard_patient_detail(row)
 
     def table_mouse_click(self, row, col):
-        if self.table.selectionModel().isRowSelected(row):
-            self.table.clearSelection()
-        else:
-            self.table.selectRow(row)
+        self.table.selectRow(row)
+        self._sync_calendar_companions()
+        self.select_calendar_patient(row)
         self.update_button_states()
+
+    def status_table_mouse_click(self, row, col):
+        self.table_mouse_click(row, 1)
+
+    def notes_table_mouse_click(self, row, col):
+        self.table_mouse_click(row, 8)
 
     def add_note_to_log(self, patient_id):
         new_note = self.notes_input.text().strip()
@@ -8966,8 +10939,8 @@ class WebsterCalendarApp(QMainWindow):
         if selected < 0:
             return
 
-        number_item = self.table.item(selected, 1)  # Column 1 = patient number
-        name_item = self.table.item(selected, 3)
+        number_item = self.table.item(selected, self.CAL_COL_NUMBER)
+        name_item = self.table.item(selected, self.CAL_COL_NAME)
         if not number_item or not name_item:
             return
 
@@ -8998,7 +10971,7 @@ class WebsterCalendarApp(QMainWindow):
         selected = self.table.currentRow()
         if selected < 0:
             return
-        name_item = self.table.item(selected, 3)
+        name_item = self.table.item(selected, self.CAL_COL_NAME)
         if not name_item:
             return
         name = name_item.text().strip()
@@ -9045,7 +11018,13 @@ class WebsterCalendarApp(QMainWindow):
         if self.active_user:
             return True
 
+        if getattr(self, "login_dialog", None) is not None and self.login_dialog.isVisible():
+            self.login_dialog.raise_()
+            self.login_dialog.activateWindow()
+            return False
+
         dialog = QDialog(self, Qt.FramelessWindowHint | Qt.Dialog)
+        self.login_dialog = dialog
         dialog.setWindowModality(Qt.ApplicationModal)
         dialog.setFixedSize(480, 500)
         dialog.setStyleSheet("background-color: rgb(228, 224, 219);")
@@ -9097,7 +11076,13 @@ class WebsterCalendarApp(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
         login_field.setFocus()
+
+        if hasattr(self, "inactivity_timer"):
+            self.inactivity_timer.stop()
         dialog.exec_()
+        self.login_dialog = None
+        if hasattr(self, "inactivity_timer"):
+            self.inactivity_timer.start()
 
         return bool(self.active_user)
     def is_authorized(self):
@@ -9125,6 +11110,11 @@ class WebsterCalendarApp(QMainWindow):
         QLineEdit.mousePressEvent(self.login_input, event)
 
     def eventFilter(self, obj, event):
+        if hasattr(self, "table") and obj == self.table.viewport() and event.type() == QEvent.Resize:
+            QTimer.singleShot(0, self._sync_calendar_companions)
+        if hasattr(self, "notes_table") and obj == self.notes_table.viewport() and event.type() == QEvent.Resize:
+            QTimer.singleShot(0, self._refresh_notes_table_from_main)
+
         # Handle backspace logout for both login fields
         if event.type() == event.KeyPress and event.key() == Qt.Key_Backspace:
             if obj == self.login_input:
@@ -9276,7 +11266,8 @@ class WebsterCalendarApp(QMainWindow):
                 number = result[0]
                 row_index = None
                 for row in range(self.table.rowCount()):
-                    if self.table.item(row, 1).text() == str(number):
+                    number_item = self.table.item(row, self.CAL_COL_NUMBER)
+                    if number_item and number_item.text() == str(number):
                         row_index = row
                         break
                 if row_index is not None:
@@ -9567,7 +11558,7 @@ class WebsterCalendarApp(QMainWindow):
             return
 
         # --- Skip if paused or flagged ---
-        name_item = self.table.item(selected_row, 3)
+        name_item = self.table.item(selected_row, self.CAL_COL_NAME)
         if name_item:
             patient_name = name_item.text().strip()
             self.cur.execute("SELECT paused, flagged FROM patients WHERE name = ?", (patient_name,))
@@ -9576,11 +11567,12 @@ class WebsterCalendarApp(QMainWindow):
                 return  # silently do nothing
 
         # --- Skip if already collected ---
-        collected_item = self.table.item(selected_row, 5)  # "Picked Up" column
-        if collected_item and collected_item.text().strip():
+        collected_item = self.table.item(selected_row, self.CAL_COL_PICKED_UP)
+        collected_text = collected_item.text().strip() if collected_item else ""
+        if collected_text and collected_text not in ("-", "—", "â€”"):
             return  # silently do nothing
 
-        number_item = self.table.item(selected_row, 1)
+        number_item = self.table.item(selected_row, self.CAL_COL_NUMBER)
         if not number_item:
             return
         number = number_item.text().strip()
@@ -9680,10 +11672,10 @@ class WebsterCalendarApp(QMainWindow):
             target_number = str(patient_number).strip()
 
             for r in range(self.table.rowCount()):
-                number_item = self.table.item(r, 1)
+                number_item = self.table.item(r, self.CAL_COL_NUMBER)
                 if number_item and number_item.text().strip() == target_number:
                     selected_row = r
-                    self.table.setCurrentCell(r, 1)
+                    self.table.setCurrentCell(r, self.CAL_COL_NUMBER)
                     self.table.selectRow(r)
                     break
 
@@ -9693,15 +11685,19 @@ class WebsterCalendarApp(QMainWindow):
             return
 
         # --- Green row check ---
-        date_packed_item = self.table.item(selected_row, 4)  # "Date Packed"
-        collected_item = self.table.item(selected_row, 5)  # "Picked Up"
+        date_packed_item = self.table.item(selected_row, self.CAL_COL_DATE_PACKED)
+        collected_item = self.table.item(selected_row, self.CAL_COL_PICKED_UP)
 
         date_packed = date_packed_item.text().strip() if date_packed_item else ""
         collected = collected_item.text().strip() if collected_item else ""
+        if date_packed in ("-", "—", "â€”"):
+            date_packed = ""
+        if collected in ("-", "—", "â€”"):
+            collected = ""
 
         needs_entry = 0
 
-        number_item = self.table.item(selected_row, 1)
+        number_item = self.table.item(selected_row, self.CAL_COL_NUMBER)
         if number_item:
             number = number_item.text().strip()
             self.cur.execute("SELECT needs_entry FROM patients WHERE number = ?", (number,))
@@ -9720,7 +11716,7 @@ class WebsterCalendarApp(QMainWindow):
                 return
 
         # --- Extract FULL NAME (for Excel filename) ---
-        name_item = self.table.item(selected_row, 3)
+        name_item = self.table.item(selected_row, self.CAL_COL_NAME)
         if not name_item:
             return
         full_name = name_item.text().strip()  # e.g. "Troy McKinnon"
@@ -9735,7 +11731,7 @@ class WebsterCalendarApp(QMainWindow):
             last_name = ""
 
         # --- Extract NUMBER (correct for DB lookup) ---
-        number_item = self.table.item(selected_row, 1)
+        number_item = self.table.item(selected_row, self.CAL_COL_NUMBER)
         if not number_item:
             return
 
@@ -10206,7 +12202,7 @@ class WebsterCalendarApp(QMainWindow):
                          INSERT INTO patients (number, name, notes, charge, date_packed, picked_up,
                                                due_date, given_out_by, weeks_per_blister,
                                                flagged, paused, ceased, pack_size)
-                         VALUES (?, ?, '', 'N', '', '', '', '', '4 weeks', 0, 0, 0, 'Large')
+                         VALUES (?, ?, '', 'N', '', '', '', '', '1 week', 0, 0, 0, '16 mm')
                          """, (number, final_name))
 
         self.conn.commit()
