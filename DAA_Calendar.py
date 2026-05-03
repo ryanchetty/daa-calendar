@@ -42,7 +42,7 @@ from PyQt5.QtWidgets import (QToolButton, QFrame,
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-APP_VERSION = "2.1.3"
+APP_VERSION = "2.1.4"
 GITHUB_OWNER = "ryanchetty"
 GITHUB_REPO = "daa-calendar"
 INSTALLER_ASSET_NAME = "DAACal_Installer.exe"
@@ -8904,11 +8904,16 @@ class WebsterCalendarApp(QMainWindow):
         )
         self.cur.execute("UPDATE patients SET notes = ? WHERE id = ?", (note_text, pid))
         self.conn.commit()
+        selected_number = getattr(self, "dashboard_selected_patient_number", "")
         self.dashboard_note_input.clear()
+        self.dashboard_note_input.setEnabled(False)
+        QTimer.singleShot(0, lambda n=selected_number: self._refresh_dashboard_after_note_saved(n))
+
+    def _refresh_dashboard_after_note_saved(self, selected_number):
         self.load_data(
             ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
         )
-        self._select_patient_number_in_table(getattr(self, "dashboard_selected_patient_number", ""))
+        self._select_patient_number_in_table(selected_number)
         self.refresh_calendar_header_counts()
 
     def _select_patient_number_in_table(self, number):
@@ -9083,14 +9088,14 @@ class WebsterCalendarApp(QMainWindow):
         cell._table_row = row_idx
         cell.setAttribute(Qt.WA_TranslucentBackground, True)
         cell.setStyleSheet("""
-            QWidget#calendarIconCell {{
+            QWidget#calendarIconCell {
                 background: transparent;
-            }}
-            QLabel {{
+            }
+            QLabel {
                 background: transparent;
                 padding: 0px;
                 margin: 0px;
-            }}
+            }
         """)
 
         layout = QHBoxLayout(cell)

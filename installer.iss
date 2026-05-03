@@ -6,7 +6,7 @@
 #define MyAppName "DAACal"
 #define MyAppExeName "DAA_Calendar.exe"
 #define MyAppPublisher "Ryan Chetty"
-#define MyAppVersion "2.1.3"
+#define MyAppVersion "2.1.4"
 #define MyAppDirName "DAACalendar"
 #define MyAppSourceDir "dist\DAA_Calendar"
 
