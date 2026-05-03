@@ -42,7 +42,7 @@ from PyQt5.QtWidgets import (QToolButton, QFrame,
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 GITHUB_OWNER = "ryanchetty"
 GITHUB_REPO = "daa-calendar"
 INSTALLER_ASSET_NAME = "DAACal_Installer.exe"
@@ -9451,6 +9451,11 @@ class WebsterCalendarApp(QMainWindow):
         if event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
             return False
 
+        now = time.monotonic()
+        last_page_at = getattr(self, "_calendar_last_page_wheel_at", 0)
+        if now - last_page_at < 0.06:
+            return True
+
         delta = event.angleDelta().y()
         if delta == 0:
             delta = event.pixelDelta().y()
@@ -9469,6 +9474,7 @@ class WebsterCalendarApp(QMainWindow):
         total_pages = max(1, int(getattr(self, "_calendar_total_pages", 1)))
         new_page = max(1, min(old_page + direction, total_pages))
         if new_page != old_page:
+            self._calendar_last_page_wheel_at = now
             self.set_calendar_page(new_page)
         return True
 
