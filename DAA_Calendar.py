@@ -42,7 +42,7 @@ from PyQt5.QtWidgets import (QToolButton, QFrame,
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-APP_VERSION = "2.1"
+APP_VERSION = "2.1.1"
 GITHUB_OWNER = "ryanchetty"
 GITHUB_REPO = "daa-calendar"
 INSTALLER_ASSET_NAME = "DAACal_Installer.exe"
@@ -654,6 +654,96 @@ class StartupSplash(QWidget):
             screen.center().x() - self.width() // 2,
             screen.center().y() - self.height() // 2
         )
+
+
+class MarqueeLabel(QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._offset = 0
+        self._direction = 1
+        self._pause_ticks = 18
+        self._tick_count = 0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._advance)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        return QSize(min(hint.width(), 260), hint.height())
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(80, hint.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_timer()
+
+    def setText(self, text):
+        super().setText(text)
+        self._offset = 0
+        self._direction = 1
+        self._tick_count = 0
+        self._sync_timer()
+        self.update()
+
+    def _text_width(self):
+        metrics = self.fontMetrics()
+        if hasattr(metrics, "horizontalAdvance"):
+            return metrics.horizontalAdvance(self.text())
+        return metrics.width(self.text())
+
+    def _sync_timer(self):
+        if self._text_width() > max(0, self.contentsRect().width()):
+            if not self._timer.isActive():
+                self._timer.start(45)
+        else:
+            self._offset = 0
+            self._timer.stop()
+
+    def _advance(self):
+        text_width = self._text_width()
+        if text_width <= max(0, self.contentsRect().width()):
+            self._offset = 0
+            self._timer.stop()
+            self.update()
+            return
+
+        if self._tick_count < self._pause_ticks:
+            self._tick_count += 1
+        else:
+            max_offset = max(0, text_width - self.contentsRect().width())
+            self._offset += self._direction
+            if self._offset >= max_offset:
+                self._offset = max_offset
+                self._direction = -1
+                self._tick_count = 0
+            elif self._offset <= 0:
+                self._offset = 0
+                self._direction = 1
+                self._tick_count = 0
+        self.update()
+
+    def paintEvent(self, event):
+        text = self.text()
+        if not text:
+            return
+
+        rect = self.contentsRect()
+        text_width = self._text_width()
+        painter = QPainter(self)
+        painter.setFont(self.font())
+        painter.setPen(self.palette().color(self.foregroundRole()))
+
+        if text_width <= rect.width():
+            painter.drawText(rect, self.alignment(), text)
+            return
+
+        painter.setClipRect(rect)
+        text_rect = QRectF(rect)
+        text_rect.setWidth(text_width + 4)
+        text_rect.moveLeft(rect.x() - self._offset)
+        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, text)
 
 
 class MPSBlisterWizardDialog(QDialog):
@@ -5800,6 +5890,8 @@ class WebsterCalendarApp(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
 
+        QTimer.singleShot(0, self._refresh_calendar_layout_for_window)
+
         splash = getattr(self, "splash", None)
         if splash is None:
             return
@@ -7644,15 +7736,18 @@ class WebsterCalendarApp(QMainWindow):
         self.alerts_section_title = alerts.layout().itemAt(0).widget()
         alerts_body = alerts.layout().itemAt(1).layout()
         self.alert_to_entered_value = self._make_dashboard_metric(
-            alerts_body, "0", "To Be Entered", resource_path(os.path.join("icons", "needs_entering.gif"))
+            alerts_body, "0", "To Be Entered", resource_path(os.path.join("icons", "needs_entering.gif")),
+            filter_key="to_be_entered"
         )
         alerts_body.addWidget(self._make_dashboard_alert_separator())
         self.alert_to_checked_value = self._make_dashboard_metric(
-            alerts_body, "0", "To Be Checked", resource_path(os.path.join("icons", "needs_checking.gif"))
+            alerts_body, "0", "To Be Checked", resource_path(os.path.join("icons", "needs_checking.gif")),
+            filter_key="needs_checking"
         )
         alerts_body.addWidget(self._make_dashboard_alert_separator())
         self.alert_warning_value = self._make_dashboard_metric(
-            alerts_body, "0", "Warnings", resource_path(os.path.join("icons", "warning_icon.gif"))
+            alerts_body, "0", "Warnings", resource_path(os.path.join("icons", "warning_icon.gif")),
+            filter_key="warnings"
         )
         zones.addWidget(alerts, 3)
 
@@ -7814,11 +7909,16 @@ class WebsterCalendarApp(QMainWindow):
             }}
         """)
 
-    def _make_dashboard_metric(self, parent_layout, value, label, icon_path=None):
+    def _make_dashboard_metric(self, parent_layout, value, label, icon_path=None, filter_key=None):
         metric = QWidget()
         layout = QVBoxLayout(metric)
         layout.setContentsMargins(10, 2, 10, 2)
         layout.setSpacing(2)
+
+        if filter_key:
+            metric.setCursor(Qt.PointingHandCursor)
+            metric.setToolTip(f"Show {label.lower()}")
+            metric.mousePressEvent = lambda event, f=filter_key: self.set_calendar_filter(f)
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
@@ -7834,16 +7934,25 @@ class WebsterCalendarApp(QMainWindow):
             icon_label.setMovie(movie)
             icon_label._movie = movie
             movie.start()
+            if filter_key:
+                icon_label.setCursor(Qt.PointingHandCursor)
+                icon_label.mousePressEvent = lambda event, f=filter_key: self.set_calendar_filter(f)
             top_row.addWidget(icon_label)
 
         value_label = QLabel(value)
         value_label.setObjectName("dashboardMetricValue")
         value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        if filter_key:
+            value_label.setCursor(Qt.PointingHandCursor)
+            value_label.mousePressEvent = lambda event, f=filter_key: self.set_calendar_filter(f)
         top_row.addWidget(value_label)
 
         text_label = QLabel(label)
         text_label.setObjectName("dashboardMetricLabel")
         text_label.setAlignment(Qt.AlignCenter)
+        if filter_key:
+            text_label.setCursor(Qt.PointingHandCursor)
+            text_label.mousePressEvent = lambda event, f=filter_key: self.set_calendar_filter(f)
 
         layout.addLayout(top_row)
         layout.addWidget(text_label)
@@ -7979,6 +8088,8 @@ class WebsterCalendarApp(QMainWindow):
 
         self.calendar_table_area = QWidget()
         self.calendar_table_area.setStyleSheet("background: white;")
+        self.calendar_table_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.calendar_table_area.installEventFilter(self)
 
         table_layout = QVBoxLayout(self.calendar_table_area)
         table_layout.setContentsMargins(0, 0, 0, 0)
@@ -7986,11 +8097,14 @@ class WebsterCalendarApp(QMainWindow):
 
         table_body = QWidget()
         self.calendar_table_body = table_body
+        table_body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        table_body.installEventFilter(self)
         table_body_layout = QHBoxLayout(table_body)
         table_body_layout.setContentsMargins(0, 0, 0, 0)
         table_body_layout.setSpacing(0)
 
         self.table = QTableWidget()
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.table.verticalHeader().setVisible(False)
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -8015,7 +8129,12 @@ class WebsterCalendarApp(QMainWindow):
         self.calendar_content_splitter.addWidget(self.calendar_table_area)
 
         self.dashboard_detail_panel = self._build_dashboard_detail_panel()
-        self.calendar_content_splitter.addWidget(self.dashboard_detail_panel)
+        self.dashboard_detail_scroll = QScrollArea()
+        self.dashboard_detail_scroll.setWidgetResizable(True)
+        self.dashboard_detail_scroll.setFrameShape(QFrame.NoFrame)
+        self.dashboard_detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.dashboard_detail_scroll.setWidget(self.dashboard_detail_panel)
+        self.calendar_content_splitter.addWidget(self.dashboard_detail_scroll)
         self.calendar_content_splitter.setStretchFactor(0, 65)
         self.calendar_content_splitter.setStretchFactor(1, 35)
         self.calendar_content_splitter.setSizes([940, 600])
@@ -8029,6 +8148,8 @@ class WebsterCalendarApp(QMainWindow):
         self.rows_per_page = getattr(self, "rows_per_page", 15)
 
         footer = QFrame()
+        self.calendar_pagination_footer = footer
+        footer.installEventFilter(self)
         footer.setObjectName("calendarPaginationFooter")
         footer.setStyleSheet("""
             QFrame#calendarPaginationFooter {
@@ -8096,12 +8217,91 @@ class WebsterCalendarApp(QMainWindow):
         if not hasattr(self, "table"):
             return
         rows_per_page = max(1, int(getattr(self, "rows_per_page", 15)))
-        row_height = self.table.verticalHeader().defaultSectionSize()
+        row_height = self._calendar_row_height_for_window(rows_per_page)
+        icon_size = self._calendar_icon_size_for_row_height(row_height)
+        self.calendar_row_icon_size = icon_size
+        self.table.verticalHeader().setDefaultSectionSize(row_height)
+        if hasattr(self, "notes_table"):
+            self.notes_table.verticalHeader().setDefaultSectionSize(row_height)
+        for row_idx in range(self.table.rowCount()):
+            self.table.setRowHeight(row_idx, row_height)
+            if hasattr(self, "notes_table") and row_idx < self.notes_table.rowCount():
+                self.notes_table.setRowHeight(row_idx, row_height)
+            self._resize_calendar_icon_cell(row_idx, icon_size)
         header_height = self.table.horizontalHeader().height()
         table_height = header_height + (rows_per_page * row_height) + 2
         self.table.setFixedHeight(table_height)
         if hasattr(self, "calendar_table_body"):
             self.calendar_table_body.setFixedHeight(table_height)
+        if hasattr(self, "table"):
+            self.table.viewport().update()
+        if hasattr(self, "notes_table"):
+            self.notes_table.viewport().update()
+
+    def _calendar_row_height_for_window(self, rows_per_page):
+        default_row_height = 67
+        minimum_row_height = 36
+        available = 0
+
+        if hasattr(self, "calendar_table_area") and self.calendar_table_area.height() > 0:
+            available = self.calendar_table_area.height()
+        elif hasattr(self, "calendar_content_splitter") and self.calendar_content_splitter.height() > 0:
+            available = self.calendar_content_splitter.height()
+
+        if available <= 0:
+            return default_row_height
+
+        footer_height = 0
+        if hasattr(self, "calendar_pagination_footer"):
+            footer_height = max(
+                self.calendar_pagination_footer.height(),
+                self.calendar_pagination_footer.sizeHint().height(),
+            )
+
+        header_height = self.table.horizontalHeader().height() or self.table.horizontalHeader().sizeHint().height()
+        table_layout = self.calendar_table_area.layout() if hasattr(self, "calendar_table_area") else None
+        layout_padding = 0
+        if table_layout is not None:
+            margins = table_layout.contentsMargins()
+            layout_padding = margins.top() + margins.bottom()
+
+        usable = available - footer_height - header_height - layout_padding - 10
+        if usable <= 0:
+            return minimum_row_height
+
+        return max(minimum_row_height, min(default_row_height, usable // rows_per_page))
+
+    def _calendar_icon_size_for_row_height(self, row_height):
+        return max(18, min(30, int(int(row_height) * 0.52)))
+
+    def _resize_calendar_icon_cell(self, row_idx, icon_size):
+        if not hasattr(self, "table"):
+            return
+        widget = self.table.cellWidget(row_idx, self.CAL_COL_ALERT)
+        if widget is None:
+            return
+
+        layout = widget.layout()
+        if layout is not None:
+            margin = 2 if icon_size <= 24 else 3
+            layout.setContentsMargins(0, margin, 0, margin)
+
+        for label in widget.findChildren(QLabel):
+            movie = getattr(label, "_movie", None)
+            if movie is None:
+                continue
+            label.setFixedSize(icon_size, icon_size)
+            movie.setScaledSize(QSize(icon_size, icon_size))
+
+    def _refresh_calendar_layout_for_window(self):
+        if not hasattr(self, "table"):
+            return
+        self._update_calendar_table_height()
+        if hasattr(self, "calendar_content_splitter"):
+            total_width = max(1, self.calendar_content_splitter.width())
+            left_width = int(total_width * 0.66)
+            self.calendar_content_splitter.setSizes([left_width, total_width - left_width])
+        self._refresh_calendar_companions_from_main()
 
     def _toggle_urgent_row_flash(self):
         if not hasattr(self, "table"):
@@ -8453,6 +8653,9 @@ class WebsterCalendarApp(QMainWindow):
 
         for idx, (key, label, border_color, value_color, bg_color) in enumerate(items):
             tile = QFrame()
+            tile.setCursor(Qt.PointingHandCursor)
+            tile.setToolTip(f"Show {label.lower()}")
+            tile.mousePressEvent = lambda event, f=key: self.set_calendar_filter(f)
             tile.setStyleSheet(
                 f"""
                 QFrame {{
@@ -8469,11 +8672,15 @@ class WebsterCalendarApp(QMainWindow):
             value = QLabel(str(counts[key]))
             value.setObjectName("overviewValue")
             value.setAlignment(Qt.AlignCenter)
+            value.setCursor(Qt.PointingHandCursor)
+            value.mousePressEvent = lambda event, f=key: self.set_calendar_filter(f)
             value.setStyleSheet(f"color: {value_color}; border: none; background: transparent;")
 
             text = QLabel(label)
             text.setObjectName("overviewLabel")
             text.setAlignment(Qt.AlignCenter)
+            text.setCursor(Qt.PointingHandCursor)
+            text.mousePressEvent = lambda event, f=key: self.set_calendar_filter(f)
             text.setStyleSheet("border: none; background: transparent; color: #111111;")
 
             tile_layout.addWidget(value)
@@ -8594,10 +8801,10 @@ class WebsterCalendarApp(QMainWindow):
 
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
-        detail_name_label = QLabel(str(name or "").title())
+        detail_name_label = MarqueeLabel(str(name or "").title())
         detail_name_label.setObjectName("detailPatientName")
-        title_row.addWidget(detail_name_label)
-        title_row.addStretch(1)
+        detail_name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        title_row.addWidget(detail_name_label, 1)
         if status_icons:
             title_row.addWidget(self._make_calendar_icon_cell(status_icons, icon_size=30, max_icons=3))
         left.addLayout(title_row)
@@ -8883,7 +9090,8 @@ class WebsterCalendarApp(QMainWindow):
 
         return gutter
 
-    def _make_calendar_icon_cell(self, statuses, icon_size=37, max_icons=3, bg_color=None, row_idx=None):
+    def _make_calendar_icon_cell(self, statuses, icon_size=None, max_icons=3, bg_color=None, row_idx=None):
+        icon_size = icon_size or getattr(self, "calendar_row_icon_size", 24)
         cell = QWidget()
         cell.setObjectName("calendarIconCell")
         cell._table_row = row_idx
@@ -8900,8 +9108,8 @@ class WebsterCalendarApp(QMainWindow):
         """)
 
         layout = QHBoxLayout(cell)
-        layout.setContentsMargins(6, 0, 14, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(4, 0, 8, 0)
+        layout.setSpacing(max(4, min(8, icon_size // 4)))
         layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         left_statuses = [status for status in (statuses or []) if status.get("kind") != "warning"]
@@ -8946,13 +9154,15 @@ class WebsterCalendarApp(QMainWindow):
 
         return cell
 
-    def _make_calendar_icon_cell_container(self, statuses, row_color, icon_size=37, max_icons=3, row_idx=None):
+    def _make_calendar_icon_cell_container(self, statuses, row_color, icon_size=None, max_icons=3, row_idx=None):
+        icon_size = icon_size or getattr(self, "calendar_row_icon_size", 24)
         outer = QWidget()
         outer.setObjectName("calendarIconCellOuter")
         outer.setAttribute(Qt.WA_TranslucentBackground, True)
 
         layout = QVBoxLayout(outer)
-        layout.setContentsMargins(0, 4, 0, 4)
+        margin = 2 if icon_size <= 24 else 3
+        layout.setContentsMargins(0, margin, 0, margin)
         layout.setSpacing(0)
 
         inner = self._make_calendar_icon_cell(statuses, icon_size=icon_size, max_icons=max_icons, row_idx=row_idx)
@@ -9237,6 +9447,31 @@ class WebsterCalendarApp(QMainWindow):
             ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
         )
 
+    def _handle_calendar_page_wheel(self, event):
+        if event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
+            return False
+
+        delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.pixelDelta().y()
+        if delta == 0:
+            return False
+
+        self._calendar_wheel_delta = getattr(self, "_calendar_wheel_delta", 0) + delta
+        threshold = 120
+        if abs(self._calendar_wheel_delta) < threshold:
+            return True
+
+        direction = -1 if self._calendar_wheel_delta > 0 else 1
+        self._calendar_wheel_delta = 0
+
+        old_page = int(getattr(self, "current_page", 1))
+        total_pages = max(1, int(getattr(self, "_calendar_total_pages", 1)))
+        new_page = max(1, min(old_page + direction, total_pages))
+        if new_page != old_page:
+            self.set_calendar_page(new_page)
+        return True
+
     def _sync_calendar_filter_buttons(self):
         if not hasattr(self, "calendar_filter_buttons"):
             return
@@ -9245,6 +9480,24 @@ class WebsterCalendarApp(QMainWindow):
             button.blockSignals(True)
             button.setChecked(key == active)
             button.blockSignals(False)
+
+    def clear_calendar_row_filters(self):
+        changed = getattr(self, "active_calendar_filter", "all") != "all"
+        self.active_calendar_filter = "all"
+        self.current_page = 1
+
+        if hasattr(self, "search_input") and self.search_input.text():
+            changed = True
+            self.search_input.blockSignals(True)
+            self.search_input.clear()
+            self.search_input.blockSignals(False)
+
+        self._sync_calendar_filter_buttons()
+        if changed:
+            self.load_data(
+                ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+            )
+        return changed
 
     def _calendar_row_warning(self, row):
         date_packed, picked_up, due_date, flagged = row[4], row[5], row[6], row[10]
@@ -11115,8 +11368,25 @@ class WebsterCalendarApp(QMainWindow):
         if hasattr(self, "notes_table") and obj == self.notes_table.viewport() and event.type() == QEvent.Resize:
             QTimer.singleShot(0, self._refresh_notes_table_from_main)
 
+        calendar_wheel_targets = []
+        if hasattr(self, "table"):
+            calendar_wheel_targets.append(self.table.viewport())
+        for attr in ("calendar_table_area", "calendar_table_body", "calendar_pagination_footer"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                calendar_wheel_targets.append(widget)
+
+        if event.type() == QEvent.Wheel and obj in calendar_wheel_targets:
+            return self._handle_calendar_page_wheel(event)
+
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+            if getattr(self, "login_dialog", None) is not None and self.login_dialog.isVisible():
+                return super().eventFilter(obj, event)
+            if hasattr(self, "tabs") and self.tabs.currentWidget() == getattr(self, "main_widget", None):
+                return self.clear_calendar_row_filters()
+
         # Handle backspace logout for both login fields
-        if event.type() == event.KeyPress and event.key() == Qt.Key_Backspace:
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Backspace:
             if obj == self.login_input:
                 self.login_input.clear()
                 self.active_user = None
@@ -11129,7 +11399,7 @@ class WebsterCalendarApp(QMainWindow):
                 self.patient_login_input.setReadOnly(False)
                 self.disable_patient_controls()
                 return True
-        if obj == self.login_input and event.type() == event.KeyPress:
+        if obj == self.login_input and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_Backspace:
                 self.login_input.clear()
                 self.active_user = None
