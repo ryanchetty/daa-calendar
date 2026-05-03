@@ -42,7 +42,7 @@ from PyQt5.QtWidgets import (QToolButton, QFrame,
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 GITHUB_OWNER = "ryanchetty"
 GITHUB_REPO = "daa-calendar"
 INSTALLER_ASSET_NAME = "DAACal_Installer.exe"
@@ -5043,7 +5043,7 @@ class PrintPreviewDialog(QDialog):
         # === Layout ===
         main_layout = QVBoxLayout()
 
-        self.week_label = QLabel(f"Week Starting: {self.this_week_start}")
+        self.week_label = QLabel(f"Label Date: {(today - timedelta(days=today.weekday()) + timedelta(days=7)).strftime('%d/%m/%Y')}")
 
         # --- Week selection controls ---
         week_layout = QHBoxLayout()
@@ -5156,116 +5156,83 @@ class PrintPreviewDialog(QDialog):
         start_of_week = today - timedelta(days=today.weekday())
         if self.next_week_radio.isChecked():
             start_of_week += timedelta(days=7)
-            self.week_label.setText(f"Week Starting: {self.next_week_start}")
-        else:
-            self.week_label.setText(f"Week Starting: {self.this_week_start}")
+        self.week_label.setText(f"Label Date: {(start_of_week + timedelta(days=7)).strftime('%d/%m/%Y')}")
         end_of_week = start_of_week + timedelta(days=6)
 
-        self.main_label.setText("DAA Packing Order")
+        self.main_label.setText(
+            f"DAA Packing Order<br><b>Week of {start_of_week.strftime('%d/%m/%Y')}</b>"
+        )
 
-        # Build main rows
+        self.parent.cur.execute("""
+            SELECT name, charge, picked_up, due_date, notes, flagged, paused, weeks_per_blister, pack_size
+            FROM patients
+            WHERE ceased = 0
+        """)
+        patient_rows = self.parent.cur.fetchall()
+
+        def effective_due_date(picked_up, due_date):
+            due_src = str(due_date or "").strip()
+            picked_src = str(picked_up or "").strip()
+            try:
+                if due_src:
+                    return datetime.strptime(due_src, "%d/%m/%Y").date()
+                if picked_src:
+                    return datetime.strptime(picked_src, "%d/%m/%Y").date() + timedelta(days=21)
+            except Exception:
+                return None
+            return None
+
+        def truthy(value):
+            return str(value or "").strip().lower() in ("1", "true", "yes", "y")
+
+        def preview_row(patient, due_dt):
+            name, charge, picked_up, due_date, notes, flagged, paused, weeks_per_blister, pack_size = patient
+            charge_text = str(charge or "").strip().upper()
+            charge_flag = "$" if charge_text in ("Y", "$") else ""
+            return [
+                (charge_flag, False),
+                (str(name or "").title(), True),
+                (due_dt.strftime("%d/%m/%Y"), False),
+                (str(weeks_per_blister or ""), False),
+                (str(pack_size or ""), False),
+                ("", False),
+                ("", False),
+                ("", False),
+                (str(notes or ""), True)
+            ]
+
         main_rows = []
         included_names = set()
-        for row in range(self.parent.table.rowCount()):
-            due_item = self.parent.table.item(row, 6)
-            if not due_item or not due_item.text().strip():
+        for patient in patient_rows:
+            name, charge, picked_up, due_date, notes, flagged, paused, weeks_per_blister, pack_size = patient
+            if truthy(flagged) or truthy(paused):
                 continue
 
-            # --- NEW: Skip paused or flagged ---
-            name_item = self.parent.table.item(row, 3)
-            patient_name = name_item.text() if name_item else ""
-            self.parent.cur.execute(
-                "SELECT flagged, paused FROM patients WHERE name = ?",
-                (patient_name,)
-            )
-            db_flags = self.parent.cur.fetchone()
-            if db_flags and (db_flags[0] or db_flags[1]):
-                continue
+            due_dt = effective_due_date(picked_up, due_date)
+            if due_dt and start_of_week.date() <= due_dt <= end_of_week.date():
+                main_rows.append(preview_row(patient, due_dt))
+                included_names.add(str(name or ""))
 
-            try:
-                due_date = datetime.strptime(due_item.text().strip(), "%d/%m/%Y").date()
-                if start_of_week.date() <= due_date <= end_of_week.date():
-                    charge_item = self.parent.table.item(row, 2)
-                    notes_item = self.parent.table.item(row, 12)
-                    charge_flag = "$" if charge_item and charge_item.text().strip().upper() == "$" else ""
-                    notes_text = notes_item.text() if notes_item else ""
-
-                    self.parent.cur.execute(
-                        "SELECT weeks_per_blister, pack_size FROM patients WHERE UPPER(name) = ?",
-                        (patient_name.upper(),)
-                    )
-                    db_row = self.parent.cur.fetchone()
-                    weeks_per_blister = db_row[0] if db_row and db_row[0] else ""
-                    tray_size = db_row[1] if db_row and db_row[1] else ""
-
-                    main_rows.append([
-                        (charge_flag, False),
-                        (patient_name, True),
-                        (due_item.text().strip(), False),
-                        (str(weeks_per_blister), False),
-                        (str(tray_size), False),
-                        ("", False),
-                        ("", False),
-                        ("", False),
-                        (notes_text, True)
-                    ])
-                    included_names.add(patient_name)
-            except:
-                pass
+        main_rows.sort(key=lambda row: (row[2][0], row[1][0].lower()))
         self.populate_table(self.preview_table, main_rows)
 
         # Build overdue rows
         if self.overdue_checkbox.isChecked():
             overdue_rows = []
-            for row in range(self.parent.table.rowCount()):
-                days_item = self.parent.table.item(row, 7)
-                if not days_item or not days_item.text().strip():
+            for patient in patient_rows:
+                name, charge, picked_up, due_date, notes, flagged, paused, weeks_per_blister, pack_size = patient
+                if truthy(flagged) or truthy(paused):
                     continue
 
-                name_item = self.parent.table.item(row, 3)
-                patient_name = name_item.text() if name_item else ""
-
-                # --- NEW: Skip paused or flagged ---
-                self.parent.cur.execute(
-                    "SELECT flagged, paused FROM patients WHERE name = ?",
-                    (patient_name,)
-                )
-                db_flags = self.parent.cur.fetchone()
-                if db_flags and (db_flags[0] or db_flags[1]):
+                due_dt = effective_due_date(picked_up, due_date)
+                if not due_dt or due_dt >= today.date():
+                    continue
+                if str(name or "") in included_names:
                     continue
 
-                try:
-                    days_val = int(days_item.text().strip())
-                except:
-                    continue
-                if days_val < 0:
-                    if patient_name in included_names:
-                        continue
-                    charge_item = self.parent.table.item(row, 2)
-                    notes_item = self.parent.table.item(row, 12)
-                    charge_flag = "$" if charge_item and charge_item.text().strip().upper() == "$" else ""
-                    notes_text = notes_item.text() if notes_item else ""
+                overdue_rows.append(preview_row(patient, due_dt))
 
-                    self.parent.cur.execute(
-                        "SELECT weeks_per_blister, pack_size FROM patients WHERE UPPER(name) = ?",
-                        (patient_name.upper(),)
-                    )
-
-                    db_row = self.parent.cur.fetchone()
-                    weeks_per_blister = db_row[0] if db_row and db_row[0] else ""
-                    tray_size = db_row[1] if db_row and db_row[1] else ""
-
-                    overdue_rows.append([
-                        (charge_flag, False),
-                        (patient_name, True),
-                        (self.parent.table.item(row, 6).text().strip(), False),
-                        (str(weeks_per_blister), False),
-                        (str(tray_size), False),
-                        ("", False),
-                        ("", False),
-                        ("", False),
-                        (notes_text, True)
-                    ])
+            overdue_rows.sort(key=lambda row: (row[2][0], row[1][0].lower()))
             if overdue_rows:
                 self.overdue_label.show()
                 self.overdue_table.show()
@@ -5332,12 +5299,13 @@ class PrintPreviewDialog(QDialog):
         else:
             week_start_date = datetime.today() - timedelta(days=datetime.today().weekday())
 
-        week_start_label = QLabel(f"Week Starting: {week_start_date.strftime('%d/%m/%Y')}")
-        week_start_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        week_start_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        label_date = week_start_date + timedelta(days=7)
+        label_date_label = QLabel(f"Label Date: {label_date.strftime('%d/%m/%Y')}")
+        label_date_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        label_date_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         date_layout.addWidget(date_printed_label)
-        date_layout.addWidget(week_start_label)
+        date_layout.addWidget(label_date_label)
 
         # --- Logo ---
         icon_label = QLabel()
@@ -5382,8 +5350,15 @@ class PrintPreviewDialog(QDialog):
 
         # --- Main table label ---
         painter.setFont(QFont("Arial", 12, QFont.Bold))
-        painter.drawText(int(left_margin_px), int(y_offset), self.main_label.text())
-        y_offset += 20
+        painter.drawText(int(left_margin_px), int(y_offset), "DAA Packing Order")
+        y_offset += 22
+        painter.setFont(QFont("Arial", 10, QFont.Bold))
+        if self.next_week_radio.isChecked():
+            title_week_start = datetime.today() - timedelta(days=datetime.today().weekday()) + timedelta(days=7)
+        else:
+            title_week_start = datetime.today() - timedelta(days=datetime.today().weekday())
+        painter.drawText(int(left_margin_px), int(y_offset), f"Week of {title_week_start.strftime('%d/%m/%Y')}")
+        y_offset += 22
 
         # --- Print main table ---
         if self.preview_table.isVisible():
@@ -5396,6 +5371,7 @@ class PrintPreviewDialog(QDialog):
             self.preview_table.resize(table_width, table_height)
             painter.translate(left_margin_px, y_offset)
             self.preview_table.render(painter)
+            self._draw_print_table_outer_border(painter, table_width, table_height)
             painter.translate(-left_margin_px, -y_offset)
             y_offset += table_height + 40
 
@@ -5413,11 +5389,21 @@ class PrintPreviewDialog(QDialog):
             self.overdue_table.resize(table_width, table_height)
             painter.translate(left_margin_px, y_offset)
             self.overdue_table.render(painter)
+            self._draw_print_table_outer_border(painter, table_width, table_height)
             painter.translate(-left_margin_px, -y_offset)
             y_offset += table_height + 40
 
         painter.end()
         print("DEBUG: Direct print complete with balanced margins and reduced top gap.")
+
+    def _draw_print_table_outer_border(self, painter, table_width, table_height):
+        painter.save()
+        pen = QPen(QColor("#111111"))
+        pen.setWidth(3)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(0, 0, int(table_width), int(table_height))
+        painter.restore()
 
     def get_saved_printer(self):
         settings = _load_daacal_settings()
