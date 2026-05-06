@@ -7682,6 +7682,7 @@ class WebsterCalendarApp(QMainWindow):
         self._build_calendar_dashboard_header()
         self._create_calendar_tables()
         self.setup_table()
+        self._refresh_calendar_layout_for_window()
         self.table.setItemPrototype(DateItem("01/01/2000"))
         showing_ceased = bool(
             getattr(self, "view_ceased_action", None)
@@ -7705,17 +7706,21 @@ class WebsterCalendarApp(QMainWindow):
         header_layout.setContentsMargins(12, 10, 12, 10)
         header_layout.setSpacing(8)
 
-        zones = QHBoxLayout()
+        zones = QGridLayout()
+        self.dashboard_zones_layout = zones
         zones.setContentsMargins(0, 0, 0, 0)
-        zones.setSpacing(16)
+        zones.setHorizontalSpacing(16)
+        zones.setVerticalSpacing(10)
 
         workflow = self._make_dashboard_section("WORKFLOW")
+        self.workflow_section = workflow
         self.workflow_body_layout = workflow.layout().itemAt(1).layout()
-        zones.addWidget(workflow, 5)
+        zones.addWidget(workflow, 0, 0)
 
         print_section = self._make_dashboard_section("PRINT")
+        self.print_section = print_section
         self.print_body_layout = print_section.layout().itemAt(1).layout()
-        zones.addWidget(print_section, 1)
+        zones.addWidget(print_section, 0, 1)
 
         alerts = self._make_dashboard_section("ALERTS (0)", alert=True)
         self.alerts_section = alerts
@@ -7735,7 +7740,10 @@ class WebsterCalendarApp(QMainWindow):
             alerts_body, "0", "Warnings", resource_path(os.path.join("icons", "warning_icon.gif")),
             filter_key="warnings"
         )
-        zones.addWidget(alerts, 3)
+        zones.addWidget(alerts, 0, 2)
+        zones.setColumnStretch(0, 5)
+        zones.setColumnStretch(1, 1)
+        zones.setColumnStretch(2, 3)
 
         header_layout.addLayout(zones)
         self._populate_calendar_header_actions(showing_ceased=False)
@@ -7802,6 +7810,7 @@ class WebsterCalendarApp(QMainWindow):
         self._ensure_dashboard_action_buttons()
         self._clear_dashboard_layout(self.workflow_body_layout)
         self._clear_dashboard_layout(self.print_body_layout)
+        self.workflow_button_groups = []
 
         if showing_ceased:
             self.workflow_body_layout.addWidget(
@@ -7811,18 +7820,26 @@ class WebsterCalendarApp(QMainWindow):
             self._style_dashboard_button(self.restore_button, "primary")
             return
 
-        self.workflow_body_layout.addWidget(
-            self._make_workflow_button_group("Preparation", [self.new_packed_button])
-        )
-        self.workflow_body_layout.addWidget(
-            self._make_workflow_button_group("Verification", [self.checked_button])
-        )
-        self.workflow_body_layout.addWidget(
-            self._make_workflow_button_group("Completion", [self.collected_button])
-        )
-        self.workflow_body_layout.addWidget(
-            self._make_workflow_button_group("State Control", [self.flag_button, self.pause_button])
-        )
+        if self._is_calendar_compact_width():
+            self.workflow_body_layout.addWidget(
+                self._make_workflow_button_group(
+                    "Workflow",
+                    [self.new_packed_button, self.checked_button, self.collected_button, self.flag_button, self.pause_button],
+                )
+            )
+        else:
+            self.workflow_body_layout.addWidget(
+                self._make_workflow_button_group("Preparation", [self.new_packed_button])
+            )
+            self.workflow_body_layout.addWidget(
+                self._make_workflow_button_group("Verification", [self.checked_button])
+            )
+            self.workflow_body_layout.addWidget(
+                self._make_workflow_button_group("Completion", [self.collected_button])
+            )
+            self.workflow_body_layout.addWidget(
+                self._make_workflow_button_group("State Control", [self.flag_button, self.pause_button])
+            )
 
         self.print_button.setText("Print Weekly Schedule")
         self._style_dashboard_button(self.print_button, "neutral")
@@ -7849,13 +7866,22 @@ class WebsterCalendarApp(QMainWindow):
 
     def _make_workflow_button_group(self, label, buttons):
         group = QWidget()
+        compact = hasattr(self, "table") and self._is_calendar_compact_width()
+        group.setSizePolicy(QSizePolicy.Fixed if compact else QSizePolicy.Expanding, QSizePolicy.Fixed)
+        if compact:
+            group.setMinimumWidth(self._calendar_workflow_required_width() - 28)
+            group.setMaximumWidth(self._calendar_workflow_required_width() - 28)
+        self.workflow_button_groups = getattr(self, "workflow_button_groups", [])
+        self.workflow_button_groups.append(group)
         layout = QVBoxLayout(group)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
+        row.setSpacing(6 if compact else 8)
+        if compact:
+            row.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         for button in buttons:
             role = (
                 "success" if button is self.collected_button
@@ -7864,12 +7890,13 @@ class WebsterCalendarApp(QMainWindow):
                 else "primary"
             )
             self._style_dashboard_button(button, role)
-            row.addWidget(button)
+            row.addWidget(button, 0 if compact else 1)
         layout.addLayout(row)
         return group
 
     def _style_dashboard_button(self, button, role):
-        button.setMinimumHeight(36)
+        compact = hasattr(self, "table") and self._is_calendar_compact_width()
+        button.setMinimumHeight(32 if compact else 36)
         button.setCursor(Qt.PointingHandCursor)
 
         styles = {
@@ -7881,13 +7908,16 @@ class WebsterCalendarApp(QMainWindow):
         }
         bg, fg, border = styles.get(role, styles["neutral"])
         hover = border if role != "neutral" else "#f8fafc"
+        padding = "6px 8px" if compact else "7px 14px"
+        font_size = "8pt" if compact else "9pt"
         button.setStyleSheet(f"""
             QPushButton {{
                 background: {bg};
                 color: {fg};
                 border: 1px solid {border};
                 border-radius: 6px;
-                padding: 7px 14px;
+                padding: {padding};
+                font-size: {font_size};
                 font-weight: 700;
             }}
             QPushButton:hover {{
@@ -8202,7 +8232,16 @@ class WebsterCalendarApp(QMainWindow):
     def _update_calendar_table_height(self):
         if not hasattr(self, "table"):
             return
-        rows_per_page = max(1, int(getattr(self, "rows_per_page", 15)))
+        old_rows_per_page = int(getattr(self, "rows_per_page", 15) or 15)
+        rows_per_page = self._calendar_rows_per_page_for_window()
+        self.rows_per_page = rows_per_page
+        if (
+            rows_per_page != old_rows_per_page
+            and self.table.rowCount() > 0
+            and not getattr(self, "_calendar_resize_reload_pending", False)
+        ):
+            self._calendar_resize_reload_pending = True
+            QTimer.singleShot(0, self._reload_calendar_after_resize)
         row_height = self._calendar_row_height_for_window(rows_per_page)
         icon_size = self._calendar_icon_size_for_row_height(row_height)
         self.calendar_row_icon_size = icon_size
@@ -8223,6 +8262,40 @@ class WebsterCalendarApp(QMainWindow):
             self.table.viewport().update()
         if hasattr(self, "notes_table"):
             self.notes_table.viewport().update()
+
+    def _reload_calendar_after_resize(self):
+        self._calendar_resize_reload_pending = False
+        if not hasattr(self, "table"):
+            return
+        self.load_data(
+            ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+        )
+
+    def _calendar_rows_per_page_for_window(self):
+        default_rows = 15
+        minimum_rows = 7
+        minimum_row_height = 36
+        available = 0
+
+        if hasattr(self, "calendar_table_area") and self.calendar_table_area.height() > 0:
+            available = self.calendar_table_area.height()
+        elif hasattr(self, "calendar_content_splitter") and self.calendar_content_splitter.height() > 0:
+            available = self.calendar_content_splitter.height()
+
+        if available <= 0 or not hasattr(self, "table"):
+            return default_rows
+
+        footer_height = 0
+        if hasattr(self, "calendar_pagination_footer"):
+            footer_height = max(
+                self.calendar_pagination_footer.height(),
+                self.calendar_pagination_footer.sizeHint().height(),
+            )
+        header_height = self.table.horizontalHeader().height() or self.table.horizontalHeader().sizeHint().height()
+        usable = available - footer_height - header_height - 14
+        if usable <= 0:
+            return minimum_rows
+        return max(minimum_rows, min(default_rows, usable // minimum_row_height))
 
     def _calendar_row_height_for_window(self, rows_per_page):
         default_row_height = 67
@@ -8283,11 +8356,263 @@ class WebsterCalendarApp(QMainWindow):
         if not hasattr(self, "table"):
             return
         self._update_calendar_table_height()
+        self._apply_calendar_compact_layout()
+        self._resize_calendar_columns()
+        self._resize_calendar_filter_controls()
+        self._resize_calendar_header_controls()
+        self._refresh_calendar_companions_from_main()
+
+    def _calendar_available_width(self):
+        if hasattr(self, "calendar_table_area") and self.calendar_table_area.width() > 0:
+            return self.calendar_table_area.width()
+        if hasattr(self, "calendar_content_splitter") and self.calendar_content_splitter.width() > 0:
+            return self.calendar_content_splitter.width()
+        return max(1, self.width() - 40)
+
+    def _is_calendar_compact_width(self):
+        return not self._calendar_has_room_for_detail_panel()
+
+    def _is_calendar_stacked_header_width(self):
+        return not self._calendar_header_fits_single_row()
+
+    def _calendar_table_required_width(self):
+        base_widths = [12, 70, 48, 48, 260, 104, 104, 104, 86]
+        return sum(base_widths) + 28
+
+    def _calendar_detail_required_width(self):
+        if hasattr(self, "dashboard_detail_scroll"):
+            return max(430, min(620, self.dashboard_detail_scroll.sizeHint().width()))
+        return 520
+
+    def _calendar_has_room_for_detail_panel(self):
+        if not hasattr(self, "calendar_content_splitter"):
+            return False
+        available = self.calendar_content_splitter.width() or max(1, self.width() - 40)
+        required = self._calendar_table_required_width() + self._calendar_detail_required_width() + 28
+        return available >= required
+
+    def _calendar_header_fits_single_row(self):
+        if not hasattr(self, "workflow_section"):
+            return True
+        available = self.width() - 44
+        required = self._calendar_header_required_width()
+        return available >= required
+
+    def _calendar_header_required_width(self):
+        compact = self._is_calendar_compact_width()
+        if compact:
+            return self._calendar_workflow_required_width() + 178 + 350 + 32
+        return (
+            self.workflow_section.minimumSizeHint().width()
+            + self.print_section.minimumSizeHint().width()
+            + self.alerts_section.minimumSizeHint().width()
+            + 32
+        )
+
+    def _calendar_workflow_required_width(self):
+        button_widths = [64, 64, 82, 74, 58] if self._is_calendar_compact_width() else [120, 150, 120, 100, 90]
+        spacing = 6 if self._is_calendar_compact_width() else 8
+        return sum(button_widths) + (spacing * (len(button_widths) - 1)) + 28
+
+    def _apply_calendar_compact_layout(self):
         if hasattr(self, "calendar_content_splitter"):
             total_width = max(1, self.calendar_content_splitter.width())
-            left_width = int(total_width * 0.66)
-            self.calendar_content_splitter.setSizes([left_width, total_width - left_width])
-        self._refresh_calendar_companions_from_main()
+            compact = self._is_calendar_compact_width()
+            if hasattr(self, "dashboard_detail_scroll"):
+                self.dashboard_detail_scroll.setVisible(not compact)
+                self.dashboard_detail_scroll.setMaximumWidth(0 if compact else 16777215)
+                self.dashboard_detail_scroll.setMinimumWidth(0)
+            if compact:
+                self.calendar_content_splitter.setSizes([total_width, 0])
+            else:
+                detail_width = min(self._calendar_detail_required_width(), max(0, total_width - self._calendar_table_required_width()))
+                left_width = total_width - detail_width
+                self.calendar_content_splitter.setSizes([left_width, total_width - left_width])
+
+    def _resize_calendar_columns(self):
+        if not hasattr(self, "table") or self.table.columnCount() <= self.CAL_COL_DAYS:
+            return
+
+        available = max(700, self._calendar_available_width() - 20)
+        compact = available < 1120
+
+        widths = {
+            self.CAL_COL_STRIP: 12,
+            self.CAL_COL_ALERT: 70 if compact else 112,
+            self.CAL_COL_NUMBER: 48 if compact else 55,
+            self.CAL_COL_CHARGE: 48 if compact else 72,
+            self.CAL_COL_DATE_PACKED: 104 if compact else 150,
+            self.CAL_COL_PICKED_UP: 104 if compact else 150,
+            self.CAL_COL_DUE_DATE: 104 if compact else 150,
+            self.CAL_COL_DAYS: 86 if compact else 120,
+        }
+
+        for col, width in widths.items():
+            self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Fixed)
+            self.table.setColumnWidth(col, width)
+
+        fixed_total = sum(widths.values())
+        min_name_width = 210 if compact else 300
+        self.table.horizontalHeader().setSectionResizeMode(self.CAL_COL_NAME, QHeaderView.Stretch)
+        self.table.setMinimumWidth(fixed_total + min_name_width + 24)
+
+    def _resize_calendar_filter_controls(self):
+        if not hasattr(self, "search_input"):
+            return
+        compact = self._is_calendar_compact_width()
+        self._refresh_calendar_filter_button_texts()
+        self.search_input.setMinimumWidth(150 if compact else 300)
+        self.search_input.setMaximumWidth(170 if compact else 16777215)
+        self.search_input.setFixedHeight(32 if compact else 36)
+        if hasattr(self, "calendar_filter_scroll"):
+            self.calendar_filter_scroll.setFixedHeight(34 if compact else 42)
+            self.calendar_filter_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        if hasattr(self, "calendar_filter_chip_layout"):
+            self.calendar_filter_chip_layout.setSpacing(4 if compact else 8)
+        for button in getattr(self, "calendar_filter_buttons", {}).values():
+            button.setMinimumHeight(30 if compact else 36)
+            button.setStyleSheet(f"""
+                QPushButton[filterChip="true"] {{
+                    background: #ffffff;
+                    color: #111827;
+                    border: 1px solid #e0e5ee;
+                    border-radius: 6px;
+                    padding: {'5px 7px' if compact else '8px 14px'};
+                    font-size: {'8pt' if compact else '9pt'};
+                    font-weight: 700;
+                }}
+                QPushButton[filterChip="true"]:checked {{
+                    background: #f6f0ff;
+                    color: #5b2dd6;
+                    border: 1px solid #b99cff;
+                }}
+            """)
+
+    def _resize_calendar_header_controls(self):
+        old_compact = bool(getattr(self, "_calendar_header_controls_compact", False))
+        compact = self._is_calendar_compact_width()
+        if old_compact != compact and hasattr(self, "workflow_body_layout"):
+            self._calendar_header_controls_compact = compact
+            self._populate_calendar_header_actions(
+                showing_ceased=bool(getattr(self, "view_ceased_action", None) and self.view_ceased_action.isChecked())
+            )
+        self._apply_calendar_header_layout()
+        if hasattr(self, "login_input"):
+            self.login_input.setFixedWidth(220 if compact else 260)
+        compact_text = {
+            "new_packed_button": "Entry",
+            "checked_button": "Check",
+            "collected_button": "Collected",
+            "flag_button": "Changes",
+            "pause_button": "Pause",
+            "print_button": "Weekly Schedule",
+        }
+        full_text = {
+            "new_packed_button": "Create Entry",
+            "checked_button": "Mark as Checked",
+            "collected_button": "Collected",
+            "flag_button": "Changes",
+            "pause_button": "Pause",
+            "print_button": "Print Weekly Schedule",
+        }
+        roles = {
+            "new_packed_button": "primary",
+            "checked_button": "primary",
+            "collected_button": "success",
+            "flag_button": "changes",
+            "pause_button": "danger",
+            "print_button": "neutral",
+        }
+        widths = {
+            "new_packed_button": 64,
+            "checked_button": 64,
+            "collected_button": 82,
+            "flag_button": 74,
+            "pause_button": 58,
+            "print_button": 150,
+        }
+        for attr, role in roles.items():
+            button = getattr(self, attr, None)
+            if button is None or sip.isdeleted(button):
+                continue
+            if attr == "pause_button" and button.text() == "Paused":
+                text = "Paused"
+            elif attr == "flag_button" and button.text() == "Flagged":
+                text = "Flagged"
+            else:
+                text = compact_text[attr] if compact else full_text[attr]
+            button.setText(text)
+            if compact:
+                button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                button.setMinimumWidth(widths[attr])
+                button.setMaximumWidth(widths[attr])
+            else:
+                button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+                button.setMinimumWidth(0)
+                button.setMaximumWidth(16777215)
+            self._style_dashboard_button(button, role)
+        for group in getattr(self, "workflow_button_groups", []):
+            if group is None or sip.isdeleted(group):
+                continue
+            group.setSizePolicy(QSizePolicy.Fixed if compact else QSizePolicy.Expanding, QSizePolicy.Fixed)
+            group_layout = group.layout()
+            if not group_layout or not group_layout.count():
+                continue
+            row_layout = group_layout.itemAt(0).layout()
+            if row_layout:
+                alignment = (Qt.AlignLeft | Qt.AlignVCenter) if compact else Qt.Alignment()
+                row_layout.setAlignment(alignment)
+                for idx in range(row_layout.count()):
+                    row_layout.setStretch(idx, 0 if compact else 1)
+
+    def _apply_calendar_header_layout(self):
+        if not hasattr(self, "dashboard_zones_layout"):
+            return
+        stacked = self._is_calendar_stacked_header_width()
+        workflow = getattr(self, "workflow_section", None)
+        print_section = getattr(self, "print_section", None)
+        alerts = getattr(self, "alerts_section", None)
+        if not workflow or not print_section or not alerts:
+            return
+
+        current_stacked = bool(getattr(self, "_calendar_header_stacked", False))
+        if current_stacked != stacked:
+            for widget in (workflow, print_section, alerts):
+                self.dashboard_zones_layout.removeWidget(widget)
+            if stacked:
+                self.dashboard_zones_layout.addWidget(workflow, 0, 0, 1, 2)
+                self.dashboard_zones_layout.addWidget(print_section, 1, 0)
+                self.dashboard_zones_layout.addWidget(alerts, 1, 1)
+            else:
+                self.dashboard_zones_layout.addWidget(workflow, 0, 0)
+                self.dashboard_zones_layout.addWidget(print_section, 0, 1)
+                self.dashboard_zones_layout.addWidget(alerts, 0, 2)
+            self._calendar_header_stacked = stacked
+
+        if stacked:
+            self.dashboard_zones_layout.setColumnStretch(0, 1)
+            self.dashboard_zones_layout.setColumnStretch(1, 3)
+            workflow.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            print_section.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            alerts.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        else:
+            compact = self._is_calendar_compact_width()
+            self.dashboard_zones_layout.setColumnStretch(0, 0 if compact else 5)
+            self.dashboard_zones_layout.setColumnStretch(1, 0 if compact else 1)
+            self.dashboard_zones_layout.setColumnStretch(2, 1 if compact else 3)
+            workflow.setSizePolicy(QSizePolicy.Fixed if compact else QSizePolicy.Expanding, QSizePolicy.Fixed)
+            workflow.setMinimumWidth(self._calendar_workflow_required_width() if compact else 0)
+            workflow.setMaximumWidth(self._calendar_workflow_required_width() if compact else 16777215)
+            print_section.setSizePolicy(QSizePolicy.Fixed if compact else QSizePolicy.Preferred, QSizePolicy.Fixed)
+            alerts.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def _refresh_calendar_filter_button_texts(self):
+        if not hasattr(self, "calendar_filter_buttons"):
+            return
+        rows = getattr(self, "_calendar_all_rows", None)
+        if rows is None:
+            return
+        self._refresh_calendar_filter_labels(rows)
 
     def _toggle_urgent_row_flash(self):
         if not hasattr(self, "table"):
@@ -8333,6 +8658,25 @@ class WebsterCalendarApp(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
+        chip_scroll = QScrollArea()
+        self.calendar_filter_scroll = chip_scroll
+        chip_scroll.setWidgetResizable(True)
+        chip_scroll.setFrameShape(QFrame.NoFrame)
+        chip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        chip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        chip_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        chip_scroll.setFixedHeight(42)
+
+        chip_widget = QWidget()
+        chip_widget.setObjectName("calendarFilterChipWidget")
+        chip_widget.setStyleSheet("QWidget#calendarFilterChipWidget { background: #ffffff; }")
+        chip_layout = QHBoxLayout(chip_widget)
+        chip_layout.setContentsMargins(0, 0, 0, 0)
+        chip_layout.setSpacing(8)
+        self.calendar_filter_chip_layout = chip_layout
+        chip_scroll.setWidget(chip_widget)
+        layout.addWidget(chip_scroll, 1)
+
         filters = [
             ("all", "All"),
             ("due_today", "Due Today"),
@@ -8349,11 +8693,11 @@ class WebsterCalendarApp(QMainWindow):
             btn.setCheckable(True)
             btn.setProperty("filterChip", True)
             btn.clicked.connect(lambda checked=False, f=key: self.set_calendar_filter(f))
-            layout.addWidget(btn)
+            chip_layout.addWidget(btn)
             self.calendar_filter_buttons[key] = btn
 
         self._sync_calendar_filter_buttons()
-        layout.addStretch(1)
+        chip_layout.addStretch(1)
 
         self.search_input = QLineEdit()
         self.search_input.setObjectName("calendarSearchInput")
@@ -9583,7 +9927,7 @@ class WebsterCalendarApp(QMainWindow):
         if not hasattr(self, "calendar_filter_buttons"):
             return
 
-        labels = {
+        full_labels = {
             "all": "All",
             "due_today": "Due Today",
             "due_this_week": "Due This Week",
@@ -9593,10 +9937,23 @@ class WebsterCalendarApp(QMainWindow):
             "changes": "Changes",
             "paused": "Paused",
         }
+        compact_labels = {
+            "all": "All",
+            "due_today": "Today",
+            "due_this_week": "Week",
+            "due_next_week": "Next",
+            "needs_checking": "Check",
+            "ready_for_collection": "Collect",
+            "changes": "Changes",
+            "paused": "Paused",
+        }
+        compact = self._is_calendar_compact_width() if hasattr(self, "calendar_content_splitter") else False
+        labels = compact_labels if compact else full_labels
         for key, label in labels.items():
             button = self.calendar_filter_buttons.get(key)
             if not button:
                 continue
+            button.setToolTip(full_labels[key])
             if key == "all":
                 button.setText(label)
             else:
@@ -9735,6 +10092,7 @@ class WebsterCalendarApp(QMainWindow):
                     rows[i][7] = None
 
             self._sort_calendar_rows(rows)
+            self._calendar_all_rows = list(rows)
             if ceased:
                 self._refresh_calendar_filter_labels(rows)
             else:
@@ -11556,6 +11914,8 @@ class WebsterCalendarApp(QMainWindow):
             self.tabs.currentWidget().layout().update()
             for child in self.tabs.currentWidget().findChildren(QWidget):
                 child.updateGeometry()
+        if hasattr(self, "table"):
+            QTimer.singleShot(0, self._refresh_calendar_layout_for_window)
 
     def disable_patient_controls(self):
         for attr in ['first_name_input', 'last_name_input', 'charge_input', 'packed_input', 'picked_input',
